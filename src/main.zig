@@ -64,6 +64,16 @@ const LuaState = struct {
         }
     }
 
+    pub fn allocGet(self: *LuaState, comptime T: type, name: [] const u8) !T {
+        const typ = lua.lua_getglobal(self.L, @ptrCast([*c] const u8, name));
+        if (typ != lua.LUA_TNIL) {
+            return try self.allocPop(T);
+        }
+        else {
+            return error.novalue;
+        }
+    }
+
     fn pushSlice(self: *LuaState, comptime T: type, values: []const T) void {
         lua.lua_createtable(self.L, @intCast(c_int, values.len), 0);
 
@@ -125,7 +135,7 @@ const LuaState = struct {
     fn pop(self: *LuaState, comptime T: type) !T {
         defer lua.lua_pop(self.L, 1);
         switch (@typeInfo(T)) {
-            //.Void => lua.lua_pushnil(self.L),
+            .Void => {},    // just pop
             .Bool => {
                 var res = lua.lua_toboolean(self.L, -1);
                 return if (res > 0) true else false;
@@ -140,16 +150,57 @@ const LuaState = struct {
                 var result: T = @floatCast(T, lua.lua_tonumberx(self.L, -1, isnum));
                 return result;
             },
-            .Pointer => {
-                var len: usize = 0;
-                var ptr: [*c] const u8 = lua.lua_tolstring(self.L, -1, @ptrCast([*c]usize, &len));
-                const result: []u8 = try self.allocator.alloc(u8, len);
-                std.mem.copy(u8, result[0..], ptr[0..len]);
-                return result;
+            // Only string, allocless get (Lua holds the pointer, it is only a slice pointing to it)
+            .Pointer => |PointerInfo| switch (PointerInfo.size) {
+                .Slice => {
+                    // [] const u8 case
+                    if (PointerInfo.child == u8 and PointerInfo.is_const)
+                    {
+                        var len: usize = 0;
+                        var ptr = lua.lua_tolstring(self.L, -1, @ptrCast([*c]usize, &len));
+                        var result: T = ptr[0..len];
+                        return result;
+                    }
+                    else @compileError("Only '[]const u8' (aka string) is supported allocless.");
+                },
+                else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
             },
             else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
         }
+    }
 
+    fn allocPop(self: *LuaState, comptime T: type) !T {
+        defer lua.lua_pop(self.L, 1);
+        switch (@typeInfo(T)) {
+            .Pointer => |PointerInfo| switch (PointerInfo.size) {
+                .One => @compileError("One"),
+                .Many => @compileError("Many"),
+                .Slice => @compileError("Slice"),
+                .C => @compileError("C"),
+
+                // if (lua.lua_isstring(self.L, -1) > 0)
+                // {
+                //     @compileLog("Type: '" ++ @typeName(T) ++ "'");
+                //     if (PointerInfo.child != u8 or !PointerInfo.is_const) return error.type_mismatch;
+                //     var len: usize = 0;
+                //     var ptr = lua.lua_tolstring(self.L, -1, @ptrCast([*c]usize, &len));
+                //     //var result = try self.allocator.alloc(u8, len);
+                //     //std.mem.copy(u8, result, ptr[0..len]);
+                //     var result: T = ptr[0..len];
+                //     return result;
+                // }
+                // else if (lua.lua_type(self.L, -1) == lua.LUA_TTABLE)
+                // {
+                //     std.log.info("Ajjaj 1", .{});
+                //     return error.not_string;
+                // } else
+                // {
+                //     std.log.info("Ajjaj 2", .{});
+                //     return error.not_string;
+                // }
+            },
+            else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
+        }
     }
 
     // Credit: https://github.com/daurnimator/zig-autolua
@@ -302,29 +353,15 @@ test "set/get string" {
     luaState.set("cstringOne", cstrOne);
     luaState.set("cstringC", cstrC);
 
-    const retStrMany = try luaState.get([]u8, "stringMany");
-    defer std.testing.allocator.free(retStrMany);
+    const retStrMany = try luaState.get([]const u8, "stringMany");
+    const retCStrMany = try luaState.get([]const u8, "cstringMany");
+    const retStrSlice = try luaState.get([]const u8, "stringSlice");
+    const retCStrSlice = try luaState.get([]const u8, "cstringSlice");
 
-    const retCStrMany = try luaState.get([]u8, "cstringMany");
-    defer std.testing.allocator.free(retCStrMany);
-
-    const retStrSlice = try luaState.get([]u8, "stringSlice");
-    defer std.testing.allocator.free(retStrSlice);
-
-    const retCStrSlice = try luaState.get([]u8, "cstringSlice");
-    defer std.testing.allocator.free(retCStrSlice);
-
-    const retStrOne = try luaState.get([]u8, "stringOne");
-    defer std.testing.allocator.free(retStrOne);
-
-    const retCStrOne = try luaState.get([]u8, "cstringOne");
-    defer std.testing.allocator.free(retCStrOne);
-
-    const retStrC = try luaState.get([]u8, "stringC");
-    defer std.testing.allocator.free(retStrC);
-
-    const retCStrC = try luaState.get([]u8, "cstringC");
-    defer std.testing.allocator.free(retCStrC);
+    const retStrOne = try luaState.get([]const u8, "stringOne");
+    const retCStrOne = try luaState.get([]const u8, "cstringOne");
+    const retStrC = try luaState.get([]const u8, "stringC");
+    const retCStrC = try luaState.get([]const u8, "cstringC");
 
     try std.testing.expectEqual(std.mem.eql(u8, strMany[0..retStrMany.len], retStrMany), true);
     try std.testing.expectEqual(std.mem.eql(u8, strSlice[0..retStrSlice.len], retStrSlice), true);
