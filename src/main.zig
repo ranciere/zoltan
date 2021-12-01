@@ -7,15 +7,16 @@ pub const lua = @cImport({
     @cInclude("lualib.h");
 });
 
-const LuaTable = struct {
-
-};
-
 const LuaState = struct {
     L: *lua.lua_State,
     allocator: *std.mem.Allocator,
     //registeredTypes: std.ArrayList(std.builtin.TypeInfo),
     registeredTypes: std.ArrayList([]const u8),
+
+    // const LuaTable: struct {
+    //     luaState: *LuaState,
+
+    // };
 
     pub fn init(allocator: *std.mem.Allocator) !LuaState {
         var _state = lua.lua_newstate(alloc, allocator) orelse return error.OutOfMemory;
@@ -42,9 +43,10 @@ const LuaState = struct {
     }
 
     pub fn newUserType(self: *LuaState, comptime T: type) !void {
-        if (@typeInfo(T) == .Type)
+        if (@typeInfo(T) == .Struct)
         {
             try self.registeredTypes.append(@typeName(T));
+            std.log.info("'{s}' is registered.", .{@typeName(T)});
         }
         else @compileError("New user type is invalid: '" ++ @typeName(T) ++ "'. Only 'struct'-s allowed." );
     }
@@ -78,7 +80,7 @@ const LuaState = struct {
         lua.lua_createtable(self.L, @intCast(c_int, values.len), 0);
 
         for (values) |value, i| {
-            self.push(i);
+            self.push(i+1);
             self.push(value);
             lua.lua_settable(self.L, -3);
         }
@@ -173,31 +175,24 @@ const LuaState = struct {
         defer lua.lua_pop(self.L, 1);
         switch (@typeInfo(T)) {
             .Pointer => |PointerInfo| switch (PointerInfo.size) {
-                .One => @compileError("One"),
-                .Many => @compileError("Many"),
-                .Slice => @compileError("Slice"),
-                .C => @compileError("C"),
-
-                // if (lua.lua_isstring(self.L, -1) > 0)
-                // {
-                //     @compileLog("Type: '" ++ @typeName(T) ++ "'");
-                //     if (PointerInfo.child != u8 or !PointerInfo.is_const) return error.type_mismatch;
-                //     var len: usize = 0;
-                //     var ptr = lua.lua_tolstring(self.L, -1, @ptrCast([*c]usize, &len));
-                //     //var result = try self.allocator.alloc(u8, len);
-                //     //std.mem.copy(u8, result, ptr[0..len]);
-                //     var result: T = ptr[0..len];
-                //     return result;
-                // }
-                // else if (lua.lua_type(self.L, -1) == lua.LUA_TTABLE)
-                // {
-                //     std.log.info("Ajjaj 1", .{});
-                //     return error.not_string;
-                // } else
-                // {
-                //     std.log.info("Ajjaj 2", .{});
-                //     return error.not_string;
-                // }
+                .Slice => {
+                    if (lua.lua_type(self.L, -1) == lua.LUA_TTABLE) {
+                        lua.lua_len(self.L, -1);
+                        const len = try self.pop(u64);
+                        var res = try self.allocator.alloc(PointerInfo.child, @intCast(usize, len));
+                        var i: u32 = 0;
+                        while (i < len) : (i+=1) {
+                            self.push(i+1);
+                            _ = lua.lua_gettable(self.L, -2);
+                            res[i] = try self.pop(PointerInfo.child);
+                        }
+                        return res;
+                    } else {
+                        std.log.info("Ajjaj 2", .{});
+                        return error.not_table;
+                    }                
+                },
+                else => @compileError("Only Slice is supported."),
             },
             else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
         }
@@ -259,30 +254,8 @@ pub fn main() anyerror!void {
     defer luaState.destroy();
     luaState.openLibs();
 
-    const values = [_]i32 { 4, 5, 3, 4, 0 };
-    const chValues = [_]u8 { 'A', 'P', 'A' };
-    const strValues = [_][] const u8 {"Maci", "Kutyu"};
-    const arr = try allocArray(&gpa.allocator);
-    std.log.info("Size: {}, 10th elem: {}", .{arr.len, arr[10]});
-
-    lua.lua_createtable(luaState.L, 2, 0);
-    luaState.push(0);
-    luaState.push(true);
-    lua.lua_settable(luaState.L, -3);
-    luaState.push(1);
-    luaState.push(42);
-    lua.lua_settable(luaState.L, -3);
-    lua.lua_setglobal(luaState.L, @ptrCast([*c] const u8, "tablicsku"));
-
-    luaState.set("elso", values);
-    luaState.set("chElso", chValues);
-    luaState.set("strArray", strValues);
-
-    luaState.run("print('Bela'); print(tablicsku); print(tablicsku[0]); print(tablicsku[1]); print(tablicsku[2]);");
-    luaState.run("print('--------'); print(elso[0]); print(elso[1]); print(elso[2]); print(elso[3]); print(elso[4]); print(elso[5]);");
-    luaState.run("print('--------'); print(chElso[0]); print(chElso[1]); print(chElso[2]); print(chElso[3]); print(chElso[4]); print(chElso[5]);");
-    luaState.run("print('--------'); print(strArray[0]); print(strArray[1]); print(strArray[2]); print(strArray[3]); print(strArray[4]); print(strArray[5]);");
-    //try luaState.newUserType(LuaState);
+    //std.log.info("LuaTable: '{s}'", .{@typeName(LuaTable)});
+    //var tbl: LuaState.LuaTable;
 }
 
 test "set/get scalar" {
@@ -363,13 +336,43 @@ test "set/get string" {
     const retStrC = try luaState.get([]const u8, "stringC");
     const retCStrC = try luaState.get([]const u8, "cstringC");
 
-    try std.testing.expectEqual(std.mem.eql(u8, strMany[0..retStrMany.len], retStrMany), true);
-    try std.testing.expectEqual(std.mem.eql(u8, strSlice[0..retStrSlice.len], retStrSlice), true);
-    try std.testing.expectEqual(std.mem.eql(u8, strOne[0..retStrOne.len], retStrOne), true);
-    try std.testing.expectEqual(std.mem.eql(u8, strC[0..retStrC.len], retStrC), true);
+    try std.testing.expect(std.mem.eql(u8, strMany[0..retStrMany.len], retStrMany));
+    try std.testing.expect(std.mem.eql(u8, strSlice[0..retStrSlice.len], retStrSlice));
+    try std.testing.expect(std.mem.eql(u8, strOne[0..retStrOne.len], retStrOne));
+    try std.testing.expect(std.mem.eql(u8, strC[0..retStrC.len], retStrC));
+    
+    try std.testing.expect(std.mem.eql(u8, cstrMany[0..retStrMany.len], retCStrMany));
+    try std.testing.expect(std.mem.eql(u8, cstrSlice[0..retStrSlice.len], retCStrSlice));
+    try std.testing.expect(std.mem.eql(u8, cstrOne[0..retStrOne.len], retCStrOne));
+    try std.testing.expect(std.mem.eql(u8, cstrC[0..retStrC.len], retCStrC));
+}
 
-    try std.testing.expectEqual(std.mem.eql(u8, cstrMany[0..retStrMany.len], retCStrMany), true);
-    try std.testing.expectEqual(std.mem.eql(u8, cstrSlice[0..retStrSlice.len], retCStrSlice), true);
-    try std.testing.expectEqual(std.mem.eql(u8, cstrOne[0..retStrOne.len], retCStrOne), true);
-    try std.testing.expectEqual(std.mem.eql(u8, cstrC[0..retStrC.len], retCStrC), true);
+test "set/get slice of primitive type (scalar, unmutable string)" {
+    var luaState = try LuaState.init(std.testing.allocator);
+    defer luaState.destroy();
+
+    const boolSlice = [_]bool {true, false, true};
+    const intSlice = [_]i32 { 4, 5, 3, 4, 0 };
+    const strSlice = [_][] const u8 {"Macilaci", "Gyumifagyi", "Angolhazi"};
+    
+    luaState.set("boolSlice", boolSlice);
+    luaState.set("intSlice", intSlice);
+    luaState.set("strSlice", strSlice);
+
+    const retBoolSlice = try luaState.allocGet([]i32, "boolSlice");
+    defer std.testing.allocator.free(retBoolSlice);
+
+    const retIntSlice = try luaState.allocGet([]i32, "intSlice");
+    defer std.testing.allocator.free(retIntSlice);
+
+    const retStrSlice = try luaState.allocGet([][]const u8, "strSlice");
+    defer std.testing.allocator.free(retStrSlice);
+
+    for (retIntSlice) |v,i| {
+        try std.testing.expectEqual(v, intSlice[i]);
+    }
+
+    for (retStrSlice) |v,i| {
+        try std.testing.expect(std.mem.eql(u8,v, strSlice[i]));
+    }
 }
