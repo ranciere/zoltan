@@ -17,13 +17,73 @@ const LuaState = struct {
     //registeredTypes: std.ArrayList(std.builtin.TypeInfo),
     registeredTypes: std.ArrayList([]const u8),
 
+    pub fn init(allocator: *std.mem.Allocator) !LuaState {
+        var _state = lua.lua_newstate(alloc, allocator) orelse return error.OutOfMemory;
+        var state = LuaState {
+            .L = _state,
+            .allocator = allocator,
+            .registeredTypes = std.ArrayList([]const u8).init(allocator),
+        };
+        return state;        
+    }
+
+    pub fn destroy(self: *LuaState) void {
+        _ = lua.lua_close(self.L);
+    }
+
+
+    pub fn openLibs(self: *LuaState) void {
+        _ = lua.luaL_openlibs(self.L);
+    }
+
+    pub fn run(self: *LuaState, script: []const u8) void {
+        _ = lua.luaL_loadstring(self.L, @ptrCast([*c]const u8, script));
+        _ = lua.lua_pcallk(self.L, 0, 0, 0, 0, null);
+    }
+
+    pub fn newUserType(self: *LuaState, comptime T: type) !void {
+        if (@typeInfo(T) == .Type)
+        {
+            try self.registeredTypes.append(@typeName(T));
+        }
+        else @compileError("New user type is invalid: '" ++ @typeName(T) ++ "'. Only 'struct'-s allowed." );
+    }
+
+    pub fn set(self: *LuaState, name: [] const u8, value: anytype) void {
+        _ = self.push(value);
+        _ = lua.lua_setglobal(self.L, @ptrCast([*c] const u8, name));
+    }
+
+    pub fn get(self: *LuaState, comptime T: type, name: [] const u8) !T {
+        const typ = lua.lua_getglobal(self.L, @ptrCast([*c] const u8, name));
+        if (typ != lua.LUA_TNIL) {
+            return try self.pop(T);
+        }
+        else {
+            return error.novalue;
+        }
+    }
+
+    fn pushSlice(self: *LuaState, comptime T: type, values: []const T) void {
+        lua.lua_createtable(self.L, @intCast(c_int, values.len), 0);
+
+        for (values) |value, i| {
+            self.push(i);
+            self.push(value);
+            lua.lua_settable(self.L, -3);
+        }
+    }
+
     fn push(self: *LuaState, value: anytype) void {
         const T = @TypeOf(value);
         switch (@typeInfo(T)) {
             .Void => lua.lua_pushnil(self.L),
             .Bool => lua.lua_pushboolean(self.L, @boolToInt(value)),
-            .Int, .ComptimeInt => lua.lua_pushinteger(self.L, value),
+            .Int, .ComptimeInt => lua.lua_pushinteger(self.L, @intCast(c_longlong, value)),
             .Float, .ComptimeFloat => lua.lua_pushnumber(self.L, value),
+            .Array => |info| {
+                self.pushSlice(info.child, value[0..]);
+            },
             .Pointer => |PointerInfo| switch (PointerInfo.size) {
                 .Slice => {
                     if (PointerInfo.child == u8) {
@@ -93,7 +153,7 @@ const LuaState = struct {
     }
 
     // Credit: https://github.com/daurnimator/zig-autolua
-    pub fn alloc(ud: ?*c_void, ptr: ?*c_void, osize: usize, nsize: usize) callconv(.C) ?*c_void {
+    fn alloc(ud: ?*c_void, ptr: ?*c_void, osize: usize, nsize: usize) callconv(.C) ?*c_void {
         const c_alignment = 16;
         const allocator = @ptrCast(*std.mem.Allocator, @alignCast(@alignOf(std.mem.Allocator), ud));
         if (@ptrCast(?[*]align(c_alignment) u8, @alignCast(c_alignment, ptr))) |previous_pointer| {
@@ -111,58 +171,7 @@ const LuaState = struct {
             return (allocator.alignedAlloc(u8, c_alignment, nsize) catch return null).ptr;
         }
     }
-
-    pub fn init(allocator: *std.mem.Allocator) !LuaState {
-        var _state = lua.lua_newstate(alloc, allocator) orelse return error.OutOfMemory;
-        var state = LuaState {
-            .L = _state,
-            .allocator = allocator,
-            .registeredTypes = std.ArrayList([]const u8).init(allocator),
-        };
-        return state;        
-    }
-
-    pub fn destroy(self: *LuaState) void {
-        _ = lua.lua_close(self.L);
-    }
-
-    pub fn openLibs(self: *LuaState) void {
-        _ = lua.luaL_openlibs(self.L);
-    }
-
-    pub fn run(self: *LuaState, script: []const u8) void {
-        _ = lua.luaL_loadstring(self.L, @ptrCast([*c]const u8, script));
-        _ = lua.lua_pcallk(self.L, 0, 0, 0, 0, null);
-    }
-
-    // pub fn registerUserType(self: LuaState, comptime T: type) !void {
-    //     try self.registeredTypes.append(@typeName(T));
-    // }
-
-    pub fn newUserType(self: *LuaState, comptime T: type) !void {
-        if (@typeInfo(T) == .Type)
-        {
-            try self.registeredTypes.append(@typeName(T));
-        }
-        else @compileError("New user type is invalid: '" ++ @typeName(T) ++ "'. Only 'struct'-s allowed." );
-    }
-
-    pub fn set(self: *LuaState, name: [] const u8, value: anytype) void {
-        _ = self.push(value);
-        _ = lua.lua_setglobal(self.L, @ptrCast([*c] const u8, name));
-    }
-
-    pub fn get(self: *LuaState, comptime T: type, name: [] const u8) !T {
-        const typ = lua.lua_getglobal(self.L, @ptrCast([*c] const u8, name));
-        if (typ != lua.LUA_TNIL) {
-            return try self.pop(T);
-        }
-        else {
-            return error.novalue;
-        }
-    }
 };
-
 
 const LuaValue = union(enum) {
     int: i64,
@@ -188,11 +197,22 @@ const Outer = struct {
     c: i64,
 };
 
+pub fn allocArray(allocator: *std.mem.Allocator) ![]u32 {
+    var res = try allocator.alloc(u32, 32768);
+    return res;
+}
+
 pub fn main() anyerror!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var luaState = try LuaState.init(&gpa.allocator);
     defer luaState.destroy();
     luaState.openLibs();
+
+    const values = [_]i32 { 4, 5, 3, 4, 0 };
+    const chValues = [_]u8 { 'A', 'P', 'A' };
+    const strValues = [_][] const u8 {"Maci", "Kutyu"};
+    const arr = try allocArray(&gpa.allocator);
+    std.log.info("Size: {}, 10th elem: {}", .{arr.len, arr[10]});
 
     lua.lua_createtable(luaState.L, 2, 0);
     luaState.push(0);
@@ -203,7 +223,14 @@ pub fn main() anyerror!void {
     lua.lua_settable(luaState.L, -3);
     lua.lua_setglobal(luaState.L, @ptrCast([*c] const u8, "tablicsku"));
 
+    luaState.set("elso", values);
+    luaState.set("chElso", chValues);
+    luaState.set("strArray", strValues);
+
     luaState.run("print('Bela'); print(tablicsku); print(tablicsku[0]); print(tablicsku[1]); print(tablicsku[2]);");
+    luaState.run("print('--------'); print(elso[0]); print(elso[1]); print(elso[2]); print(elso[3]); print(elso[4]); print(elso[5]);");
+    luaState.run("print('--------'); print(chElso[0]); print(chElso[1]); print(chElso[2]); print(chElso[3]); print(chElso[4]); print(chElso[5]);");
+    luaState.run("print('--------'); print(strArray[0]); print(strArray[1]); print(strArray[2]); print(strArray[3]); print(strArray[4]); print(strArray[5]);");
     //try luaState.newUserType(LuaState);
 }
 
