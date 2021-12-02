@@ -7,6 +7,52 @@ pub const lua = @cImport({
     @cInclude("lualib.h");
 });
 
+fn LuaFunction(comptime T: type) type {
+    const FuncType = T;
+    const RetType = 
+    switch (@typeInfo(FuncType)) {
+        .Fn => |FunctionInfo| FunctionInfo.return_type,
+        else => @compileError("Unsupported type."),
+    };
+    return struct {
+        const Self = @This();
+
+        luaState: *LuaState = undefined,
+        ref: c_int = undefined,
+        func: FuncType = undefined,
+
+        // This 'Init' assumes, that the top element of the stack is a Lua function
+        fn init(_luaState: *LuaState) Self {
+            const _ref = lua.luaL_ref(_luaState.L, lua.LUA_REGISTRYTINDEX);
+            std.log.info("Lua reference: {}", .{_ref});
+            return Self {
+                .luaState = _luaState,
+                .ref = _ref,
+            };
+        }
+
+        fn call(_: *Self, _: anytype) RetType.? {
+            // std.log.warn("Binded: {}. Calling: ", .{self.id});
+            // const res: RetType.? = @call(.{}, self.func, args);
+            // std.log.warn("Call ended.", .{});
+            // return res;
+            // fn unpack(args: anytype) void {
+            //     const ArgsType = @TypeOf(args);
+            //     _ = 
+            //     switch (@typeInfo(ArgsType)) {
+            //         .Struct => |info| info,
+            //         else => @compileError("Expected tuple or struct argument, found " ++ @typeName(ArgsType)),
+            //     };
+            //     comptime var i = 0;
+            //     const fields_info = std.meta.fields(ArgsType);
+            //     inline while (i < fields_info.len) : (i += 1) {
+            //         std.log.info("Parameter: {}: {} ({s})", .{i, args[i], fields_info[i].field_type});
+            //     }
+            // }
+        }
+    };
+}
+
 const LuaState = struct {
     L: *lua.lua_State,
     allocator: *std.mem.Allocator,
@@ -76,6 +122,7 @@ const LuaState = struct {
         }
     }
 
+    ////////////////////////////////////////////////////////////////////////////////////////////////////////////
     fn pushSlice(self: *LuaState, comptime T: type, values: []const T) void {
         lua.lua_createtable(self.L, @intCast(c_int, values.len), 0);
 
@@ -189,10 +236,22 @@ const LuaState = struct {
                         return res;
                     } else {
                         std.log.info("Ajjaj 2", .{});
-                        return error.not_table;
+                        return error.bad_type;
                     }                
                 },
                 else => @compileError("Only Slice is supported."),
+            },
+            .Struct => |_| {
+                comptime var idx = std.mem.indexOf(u8, @typeName(T), @typeName(LuaFunction)) orelse -1;
+                if (idx == 0) {
+                    if (lua.lua_type(self.L, -1) ++ lua.LUA_TFUNCTION) {
+                        return T.init(self);
+                    }
+                    else {
+                        return error.bad_type;
+                    }
+                }
+                else @compileError("Only LuaFunction supported: '" ++ idx ++ "'");
             },
             else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
         }
@@ -243,19 +302,95 @@ const Outer = struct {
     c: i64,
 };
 
+fn examplefunctor(func: anytype) struct {id: i32, call: *@TypeOf(func)} {
+    return .{
+        .id = 0,
+        .call = func,
+    };
+}
+
 pub fn allocArray(allocator: *std.mem.Allocator) ![]u32 {
     var res = try allocator.alloc(u32, 32768);
     return res;
 }
 
-pub fn main() anyerror!void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var luaState = try LuaState.init(&gpa.allocator);
-    defer luaState.destroy();
-    luaState.openLibs();
+const Macifasz = struct {
+    const Kispocs = struct {
+        id: i32,
+    };
 
-    //std.log.info("LuaTable: '{s}'", .{@typeName(LuaTable)});
-    //var tbl: LuaState.LuaTable;
+    p: Kispocs,
+};
+
+fn example(a: i32) void {
+    std.log.info("Simple: {}", .{a});
+}
+
+fn exampleDbl(a: i32, b: i32) i32 {
+    std.log.info("Double: {}/{}", .{a, b});
+    return @divTrunc(b,a);
+}
+
+fn MyFunctor(comptime T: type) type {
+    const FuncType = T;
+    const RetType = 
+    switch (@typeInfo(FuncType)) {
+        .Fn => |FunctionInfo| FunctionInfo.return_type,
+        else => @compileError("Unsupported type."),
+    };
+    return struct {
+        const Self = @This();
+
+        id: i64 = undefined,
+        func: FuncType = undefined,
+
+        fn init(_id: i64, _func: FuncType) Self {
+            return Self {
+                .id = _id,
+                .func = _func,
+            };
+        }
+
+        fn call(self: *Self, args: anytype) RetType.? {
+            std.log.warn("Binded: {}. Calling: ", .{self.id});
+            const res: RetType.? = @call(.{}, self.func, args);
+            std.log.warn("Call ended.", .{});
+            return res;
+        }
+    };
+}
+
+fn unpack(args: anytype) void {
+    const ArgsType = @TypeOf(args);
+    _ = 
+    switch (@typeInfo(ArgsType)) {
+        .Struct => |info| info,
+        else => @compileError("Expected tuple or struct argument, found " ++ @typeName(ArgsType)),
+    };
+    comptime var i = 0;
+    const fields_info = std.meta.fields(ArgsType);
+    inline while (i < fields_info.len) : (i += 1) {
+        std.log.info("Parameter: {}: {} ({s})", .{i, args[i], fields_info[i].field_type});
+    }
+}
+
+pub fn main() anyerror!void {
+    const MyFunc = MyFunctor(@TypeOf(example));
+    var myfunc = MyFunc.init(5, example);
+    const a: i32 = 5;
+
+    //const MyFuncDbl = MyFunctor(@TypeOf(exampleDbl));
+    const MyFuncDbl = MyFunctor(fn (a: i32, b: i32) i32);
+    var myfuncDbl = MyFuncDbl.init(5, exampleDbl);
+
+    myfunc.call(.{42});
+    const result = myfuncDbl.call(.{42, 314});
+    std.log.info("Result: {}", .{result});
+
+    comptime var idx = std.mem.indexOf(u8, @typeName(MyFuncDbl), "i32").?;
+    std.log.info("Zsiros: {}", .{idx});
+
+    unpack(.{a, @as(f32, 314.0)});
 }
 
 test "set/get scalar" {
