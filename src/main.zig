@@ -23,32 +23,46 @@ fn LuaFunction(comptime T: type) type {
 
         // This 'Init' assumes, that the top element of the stack is a Lua function
         fn init(_luaState: *LuaState) Self {
-            const _ref = lua.luaL_ref(_luaState.L, lua.LUA_REGISTRYTINDEX);
-            std.log.info("Lua reference: {}", .{_ref});
-            return Self {
+            const _ref = lua.luaL_ref(_luaState.L, lua.LUA_REGISTRYINDEX);
+            var res = Self {
                 .luaState = _luaState,
                 .ref = _ref,
             };
+            return res;
         }
 
-        fn call(_: *Self, _: anytype) RetType.? {
-            // std.log.warn("Binded: {}. Calling: ", .{self.id});
-            // const res: RetType.? = @call(.{}, self.func, args);
-            // std.log.warn("Call ended.", .{});
-            // return res;
-            // fn unpack(args: anytype) void {
-            //     const ArgsType = @TypeOf(args);
-            //     _ = 
-            //     switch (@typeInfo(ArgsType)) {
-            //         .Struct => |info| info,
-            //         else => @compileError("Expected tuple or struct argument, found " ++ @typeName(ArgsType)),
-            //     };
-            //     comptime var i = 0;
-            //     const fields_info = std.meta.fields(ArgsType);
-            //     inline while (i < fields_info.len) : (i += 1) {
-            //         std.log.info("Parameter: {}: {} ({s})", .{i, args[i], fields_info[i].field_type});
-            //     }
-            // }
+        fn destroy(self: *Self) void {
+            lua.luaL_unref(self.luaState.L, lua.LUA_REGISTRYINDEX, self.ref);
+        }
+
+        fn call(self: *Self, args: anytype) !RetType.? {
+            const ArgsType = @TypeOf(args);
+            if (@typeInfo(ArgsType) != .Struct) {
+                ("Expected tuple or struct argument, found " ++ @typeName(ArgsType));
+            }
+            // Getting function reference
+            _ = lua.lua_rawgeti(self.luaState.L, lua.LUA_REGISTRYINDEX, self.ref);
+            // Preparing arguments
+            comptime var i = 0;
+            const fields_info = std.meta.fields(ArgsType);
+            inline while (i < fields_info.len) : (i += 1) {
+                //std.log.info("Parameter: {}: {} ({s})", .{i, args[i], fields_info[i].field_type});
+                self.luaState.push(args[i]);
+            }
+            // Calculating retval count
+            comptime var retValCount = switch (@typeInfo(RetType.?)) {
+                .Void => 0,
+                .Struct => |StructInfo| StructInfo.fields.len,
+                else => 1,
+            };
+            // Calling
+            if (lua.lua_pcallk(self.luaState.L, fields_info.len, retValCount, 0, 0, null) != lua.LUA_OK) {
+                return error.lua_runtime_error;
+            }
+            // Getting return value(s)
+            if (retValCount > 0) {
+                return self.luaState.pop(RetType.?);
+            }
         }
     };
 }
@@ -184,17 +198,16 @@ const LuaState = struct {
     fn pop(self: *LuaState, comptime T: type) !T {
         defer lua.lua_pop(self.L, 1);
         switch (@typeInfo(T)) {
-            .Void => {},    // just pop
             .Bool => {
                 var res = lua.lua_toboolean(self.L, -1);
                 return if (res > 0) true else false;
             },
-            .Int => {
+            .Int, .ComptimeInt => {
                 var isnum: i32 = 0;
                 var result: T = @intCast(T, lua.lua_tointegerx(self.L, -1, isnum));
                 return result;
             },
-            .Float => {
+            .Float, .ComptimeFloat => {
                 var isnum: i32 = 0;
                 var result: T = @floatCast(T, lua.lua_tonumberx(self.L, -1, isnum));
                 return result;
@@ -219,10 +232,10 @@ const LuaState = struct {
     }
 
     fn allocPop(self: *LuaState, comptime T: type) !T {
-        defer lua.lua_pop(self.L, 1);
         switch (@typeInfo(T)) {
             .Pointer => |PointerInfo| switch (PointerInfo.size) {
                 .Slice => {
+                    defer lua.lua_pop(self.L, 1);
                     if (lua.lua_type(self.L, -1) == lua.LUA_TTABLE) {
                         lua.lua_len(self.L, -1);
                         const len = try self.pop(u64);
@@ -242,12 +255,13 @@ const LuaState = struct {
                 else => @compileError("Only Slice is supported."),
             },
             .Struct => |_| {
-                comptime var idx = std.mem.indexOf(u8, @typeName(T), @typeName(LuaFunction)) orelse -1;
+                comptime var idx = std.mem.indexOf(u8, @typeName(T), "LuaFunction") orelse -1;
                 if (idx == 0) {
-                    if (lua.lua_type(self.L, -1) ++ lua.LUA_TFUNCTION) {
+                    if (lua.lua_type(self.L, -1) == lua.LUA_TFUNCTION) {
                         return T.init(self);
                     }
                     else {
+                        defer lua.lua_pop(self.L, 1);
                         return error.bad_type;
                     }
                 }
@@ -331,66 +345,29 @@ fn exampleDbl(a: i32, b: i32) i32 {
     return @divTrunc(b,a);
 }
 
-fn MyFunctor(comptime T: type) type {
-    const FuncType = T;
-    const RetType = 
-    switch (@typeInfo(FuncType)) {
-        .Fn => |FunctionInfo| FunctionInfo.return_type,
-        else => @compileError("Unsupported type."),
-    };
-    return struct {
-        const Self = @This();
-
-        id: i64 = undefined,
-        func: FuncType = undefined,
-
-        fn init(_id: i64, _func: FuncType) Self {
-            return Self {
-                .id = _id,
-                .func = _func,
-            };
-        }
-
-        fn call(self: *Self, args: anytype) RetType.? {
-            std.log.warn("Binded: {}. Calling: ", .{self.id});
-            const res: RetType.? = @call(.{}, self.func, args);
-            std.log.warn("Call ended.", .{});
-            return res;
-        }
-    };
-}
-
-fn unpack(args: anytype) void {
-    const ArgsType = @TypeOf(args);
-    _ = 
-    switch (@typeInfo(ArgsType)) {
-        .Struct => |info| info,
-        else => @compileError("Expected tuple or struct argument, found " ++ @typeName(ArgsType)),
-    };
-    comptime var i = 0;
-    const fields_info = std.meta.fields(ArgsType);
-    inline while (i < fields_info.len) : (i += 1) {
-        std.log.info("Parameter: {}: {} ({s})", .{i, args[i], fields_info[i].field_type});
-    }
-}
-
 pub fn main() anyerror!void {
-    const MyFunc = MyFunctor(@TypeOf(example));
-    var myfunc = MyFunc.init(5, example);
-    const a: i32 = 5;
+    var luaState = try LuaState.init(std.testing.allocator);
+    defer luaState.destroy();
 
-    //const MyFuncDbl = MyFunctor(@TypeOf(exampleDbl));
-    const MyFuncDbl = MyFunctor(fn (a: i32, b: i32) i32);
-    var myfuncDbl = MyFuncDbl.init(5, exampleDbl);
+    luaState.openLibs();
 
-    myfunc.call(.{42});
-    const result = myfuncDbl.call(.{42, 314});
-    std.log.info("Result: {}", .{result});
+    luaState.run("function test() print('Bela'); end; function test2(a, b) print('Joci', a, b); return 128; end");
+    luaState.run("test(); test2(5)");
+    const FunType = LuaFunction(fn() void);
+    var fun = try luaState.allocGet(FunType, "test");
+    defer fun.destroy();
+    std.log.info("Call:", .{});
+    try fun.call(.{});
 
-    comptime var idx = std.mem.indexOf(u8, @typeName(MyFuncDbl), "i32").?;
-    std.log.info("Zsiros: {}", .{idx});
+    std.log.info("----------------------", .{});
 
-    unpack(.{a, @as(f32, 314.0)});
+    var fun2 = try luaState.allocGet(LuaFunction(fn(a: i32, b: bool) i32), "test2");
+    defer fun2.destroy();
+    std.log.info("Call:", .{});
+    const result = try fun2.call(.{"Mucuka", true});
+    //try fun2.call(.{"Tehenke", false});
+
+    std.log.info("Itt a vege: {}", .{result});
 }
 
 test "set/get scalar" {
