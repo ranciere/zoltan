@@ -227,6 +227,18 @@ const LuaState = struct {
                 },
                 else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
             },
+            .Struct => |StructInfo| {
+                if (StructInfo.is_tuple) {
+                    @compileError("Tuples are not supported.");
+                }
+                var result: T = .{0,0};
+                comptime var i = 0;
+                const fields_info = std.meta.fields(T);
+                inline while (i < fields_info.len) : (i += 1) {
+                    //std.log.info("Parameter: {}: {} ({s})", .{i, args[i], fields_info[i].field_type});
+                    result[i] = self.pop(@TypeOf(result[i]));
+                }
+            },
             else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
         }
     }
@@ -292,82 +304,11 @@ const LuaState = struct {
     }
 };
 
-const LuaValue = union(enum) {
-    int: i64,
-    float: f64,
-    boolean: bool,
-};
-
-pub fn mucu(mit: i32) LuaValue {
-    switch (mit) {
-        0 => return .{.int = 5},
-        1 => return .{.float = 1.5},
-        else => return .{.int = 0},
-    }
-}
-
-const Inner = struct {
-    a: i32,
-    b: bool,
-};
-
-const Outer = struct {
-    i: Inner,
-    c: i64,
-};
-
-fn examplefunctor(func: anytype) struct {id: i32, call: *@TypeOf(func)} {
-    return .{
-        .id = 0,
-        .call = func,
-    };
-}
-
-pub fn allocArray(allocator: *std.mem.Allocator) ![]u32 {
-    var res = try allocator.alloc(u32, 32768);
-    return res;
-}
-
-const Macifasz = struct {
-    const Kispocs = struct {
-        id: i32,
-    };
-
-    p: Kispocs,
-};
-
-fn example(a: i32) void {
-    std.log.info("Simple: {}", .{a});
-}
-
-fn exampleDbl(a: i32, b: i32) i32 {
-    std.log.info("Double: {}/{}", .{a, b});
-    return @divTrunc(b,a);
-}
-
 pub fn main() anyerror!void {
     var luaState = try LuaState.init(std.testing.allocator);
     defer luaState.destroy();
 
     luaState.openLibs();
-
-    luaState.run("function test() print('Bela'); end; function test2(a, b) print('Joci', a, b); return 128; end");
-    luaState.run("test(); test2(5)");
-    const FunType = LuaFunction(fn() void);
-    var fun = try luaState.allocGet(FunType, "test");
-    defer fun.destroy();
-    std.log.info("Call:", .{});
-    try fun.call(.{});
-
-    std.log.info("----------------------", .{});
-
-    var fun2 = try luaState.allocGet(LuaFunction(fn(a: i32, b: bool) i32), "test2");
-    defer fun2.destroy();
-    std.log.info("Call:", .{});
-    const result = try fun2.call(.{"Mucuka", true});
-    //try fun2.call(.{"Tehenke", false});
-
-    std.log.info("Itt a vege: {}", .{result});
 }
 
 test "set/get scalar" {
@@ -487,4 +428,46 @@ test "set/get slice of primitive type (scalar, unmutable string)" {
     for (retStrSlice) |v,i| {
         try std.testing.expect(std.mem.eql(u8,v, strSlice[i]));
     }
+}
+
+test "simple function call" {
+    var luaState = try LuaState.init(std.testing.allocator);
+    defer luaState.destroy();
+
+    luaState.openLibs();
+
+    const lua_command =
+        \\function test_1() print("Test1"); end
+        \\function test_2(a) print(a); end
+        \\function test_3(a) return a; end
+        \\function test_4(a,b) return a+b; end
+    ;
+
+    luaState.run(lua_command);
+
+    var fun1 = try luaState.allocGet(LuaFunction(fn() void), "test_1");
+    defer fun1.destroy();
+
+    var fun2 = try luaState.allocGet(LuaFunction(fn(a: i32) void), "test_2");
+    defer fun2.destroy();
+
+    var fun3_1 = try luaState.allocGet(LuaFunction(fn(a: i32) i32), "test_3");
+    defer fun3_1.destroy();
+
+    var fun3_2 = try luaState.allocGet(LuaFunction(fn(a: []const u8) []const u8), "test_3");
+    defer fun3_2.destroy();
+
+    var fun4 = try luaState.allocGet(LuaFunction(fn(a: i32, b: i32) i32), "test_4");
+    defer fun4.destroy();
+
+    try fun1.call(.{});
+    try fun2.call(.{42});
+    const res3_1 = try fun3_1.call(.{42});
+    try std.testing.expectEqual(res3_1, 42);
+
+    const res3_2 = try fun3_2.call(.{"Bela"});
+    try std.testing.expect(std.mem.eql(u8,res3_2, "Bela"));
+
+    const res4 = try fun4.call(.{42, 24});
+    try std.testing.expectEqual(res4, 66);
 }
