@@ -2,18 +2,17 @@
 A Sol inspired minimalistic Lua binding for Zig.
 
 ## Running Lua code
-```
+```zig
 var luaState = try LuaState.init(std.testing.allocator);
 defer luaState.destroy();
 
 luaState.openLibs();  // Open common standard libraries
-
+ 
 _ = luaState.run("print('Hello World!')");
 ```
 
 ## Getting/setting Lua global varible
-
-```
+```zig
 var luaState = try LuaState.init(std.testing.allocator);
 defer luaState.destroy();
 
@@ -27,8 +26,7 @@ std.log.info("String: {s}", .{str});  // I'm a string
 ```
 
 ## Calling Lua function from Zig
-
-```
+```zig
 var luaState = try LuaState.init(std.testing.allocator);
 defer luaState.destroy();
 
@@ -40,8 +38,7 @@ std.log.info("Result: {}", .{res});   // 84
 ```
 
 ## Calling Zig function from Lua
-
-```
+```zig
 var testResult: i32 = 0;
 
 fn test_fun(a: i32, b: i32) void {
@@ -58,6 +55,37 @@ luaState.set("test_fun", test_fun);
 
 luaState.run("test_fun(3,15)");
 try std.testing.expect(testResult == 45);
+
+```
+
+## Passing Lua function to Zig function
+```zig
+fn testLuaInnerFun(fun: LuaFunction(fn(a: i32) i32)) i32 {
+    var res = fun.call(.{42}) catch unreachable;
+    std.log.warn("Result: {}", .{res});
+    return res;
+}
+...
+
+// Binding on Zig side
+luaState.run("function getInt(a) print(a); return a+1; end");
+var luafun = try luaState.allocGet(LuaFunction(fn(a: i32) i32), "getInt");
+defer luafun.destroy();
+
+var result = testLuaInnerFun(luafun);
+std.log.info("Zig Result: {}", .{result});
+
+// Binding on Lua side
+luaState.set("zigFunction", testLuaInnerFun);
+
+const lua_command =
+    \\function getInt(a) print(a); return a+1; end
+    \\print("Preppare");
+    \\zigFunction(getInt);
+    \\print("Oppare");
+;
+
+luaState.run(lua_command);
 
 ```
 
