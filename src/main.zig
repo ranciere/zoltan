@@ -1,6 +1,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+var luaAllocator: *std.mem.Allocator = undefined;
+
 pub const lua = @cImport({
     @cInclude("lua.h");
     @cInclude("lauxlib.h");
@@ -17,22 +19,24 @@ fn LuaFunction(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        luaState: *LuaState = undefined,
+        L: *lua.lua_State, 
+        allocator: *std.mem.Allocator,
         ref: c_int = undefined,
         func: FuncType = undefined,
 
         // This 'Init' assumes, that the top element of the stack is a Lua function
-        fn init(_luaState: *LuaState) Self {
-            const _ref = lua.luaL_ref(_luaState.L, lua.LUA_REGISTRYINDEX);
+        fn init(_L: *lua.lua_State, _allocator: *std.mem.Allocator) Self {
+            const _ref = lua.luaL_ref(_L, lua.LUA_REGISTRYINDEX);
             var res = Self {
-                .luaState = _luaState,
+                .L = _L,
+                .allocator = _allocator,
                 .ref = _ref,
             };
             return res;
         }
 
         fn destroy(self: *Self) void {
-            lua.luaL_unref(self.luaState.L, lua.LUA_REGISTRYINDEX, self.ref);
+            lua.luaL_unref(self.L, lua.LUA_REGISTRYINDEX, self.ref);
         }
 
         fn call(self: *Self, args: anytype) !RetType.? {
@@ -41,13 +45,13 @@ fn LuaFunction(comptime T: type) type {
                 ("Expected tuple or struct argument, found " ++ @typeName(ArgsType));
             }
             // Getting function reference
-            _ = lua.lua_rawgeti(self.luaState.L, lua.LUA_REGISTRYINDEX, self.ref);
+            _ = lua.lua_rawgeti(self.L, lua.LUA_REGISTRYINDEX, self.ref);
             // Preparing arguments
             comptime var i = 0;
             const fields_info = std.meta.fields(ArgsType);
             inline while (i < fields_info.len) : (i += 1) {
                 //std.log.info("Parameter: {}: {} ({s})", .{i, args[i], fields_info[i].field_type});
-                self.luaState.push(args[i]);
+                LuaState.push(self.L, args[i]);
             }
             // Calculating retval count
             comptime var retValCount = switch (@typeInfo(RetType.?)) {
@@ -56,12 +60,12 @@ fn LuaFunction(comptime T: type) type {
                 else => 1,
             };
             // Calling
-            if (lua.lua_pcallk(self.luaState.L, fields_info.len, retValCount, 0, 0, null) != lua.LUA_OK) {
+            if (lua.lua_pcallk(self.L, fields_info.len, retValCount, 0, 0, null) != lua.LUA_OK) {
                 return error.lua_runtime_error;
             }
             // Getting return value(s)
             if (retValCount > 0) {
-                return self.luaState.pop(RetType.?);
+                return LuaState.pop(RetType.?, self.L);
             }
         }
     };
@@ -80,12 +84,13 @@ const LuaState = struct {
 
     pub fn init(allocator: *std.mem.Allocator) !LuaState {
         var _state = lua.lua_newstate(alloc, allocator) orelse return error.OutOfMemory;
+        luaAllocator = allocator;
         var state = LuaState {
             .L = _state,
             .allocator = allocator,
             .registeredTypes = std.ArrayList([]const u8).init(allocator),
         };
-        return state;        
+        return state;
     }
 
     pub fn destroy(self: *LuaState) void {
@@ -112,14 +117,14 @@ const LuaState = struct {
     }
 
     pub fn set(self: *LuaState, name: [] const u8, value: anytype) void {
-        _ = self.push(value);
+        _ = push(self.L, value);
         _ = lua.lua_setglobal(self.L, @ptrCast([*c] const u8, name));
     }
 
     pub fn get(self: *LuaState, comptime T: type, name: [] const u8) !T {
         const typ = lua.lua_getglobal(self.L, @ptrCast([*c] const u8, name));
         if (typ != lua.LUA_TNIL) {
-            return try self.pop(T);
+            return try pop(T, self.L);
         }
         else {
             return error.novalue;
@@ -129,7 +134,7 @@ const LuaState = struct {
     pub fn allocGet(self: *LuaState, comptime T: type, name: [] const u8) !T {
         const typ = lua.lua_getglobal(self.L, @ptrCast([*c] const u8, name));
         if (typ != lua.LUA_TNIL) {
-            return try self.allocPop(T);
+            return try allocPop(T, self.L, self.allocator);
         }
         else {
             return error.novalue;
@@ -137,79 +142,107 @@ const LuaState = struct {
     }
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////
-    fn pushSlice(self: *LuaState, comptime T: type, values: []const T) void {
-        lua.lua_createtable(self.L, @intCast(c_int, values.len), 0);
+    fn pushSlice(comptime T: type, L: *lua.lua_State, values: []const T) void {
+        lua.lua_createtable(L, @intCast(c_int, values.len), 0);
 
         for (values) |value, i| {
-            self.push(i+1);
-            self.push(value);
-            lua.lua_settable(self.L, -3);
+            push(L, i+1);
+            push(L, value);
+            lua.lua_settable(L, -3);
         }
     }
 
-    fn push(self: *LuaState, value: anytype) void {
+    fn push(L: *lua.lua_State, value: anytype) void {
         const T = @TypeOf(value);
         switch (@typeInfo(T)) {
-            .Void => lua.lua_pushnil(self.L),
-            .Bool => lua.lua_pushboolean(self.L, @boolToInt(value)),
-            .Int, .ComptimeInt => lua.lua_pushinteger(self.L, @intCast(c_longlong, value)),
-            .Float, .ComptimeFloat => lua.lua_pushnumber(self.L, value),
+            .Void => lua.lua_pushnil(L),
+            .Bool => lua.lua_pushboolean(L, @boolToInt(value)),
+            .Int, .ComptimeInt => lua.lua_pushinteger(L, @intCast(c_longlong, value)),
+            .Float, .ComptimeFloat => lua.lua_pushnumber(L, value),
             .Array => |info| {
-                self.pushSlice(info.child, value[0..]);
+                pushSlice(info.child, L, value[0..]);
             },
             .Pointer => |PointerInfo| switch (PointerInfo.size) {
                 .Slice => {
                     if (PointerInfo.child == u8) {
-                        _ = lua.lua_pushlstring(self.L, value.ptr, value.len);
+                        _ = lua.lua_pushlstring(L, value.ptr, value.len);
                     } else {
                         @compileError("invalid type: '" ++ @typeName(T) ++ "'");
                     }
                 },
                 .One => {
                     if (@TypeOf(PointerInfo.child) == @TypeOf([]u8)) {
-                        _ = lua.lua_pushstring(self.L, @ptrCast([*c]const u8, value));
+                        _ = lua.lua_pushstring(L, @ptrCast([*c]const u8, value));
                     } else {
                         @compileError("invalid type: '" ++ @typeName(T) ++ "'");
                     }
                 },
                 .Many => {
                     if (@TypeOf(PointerInfo.child) == @TypeOf([]u8)) {
-                        _ = lua.lua_pushstring(self.L, @ptrCast([*c]const u8, value));
+                        _ = lua.lua_pushstring(L, @ptrCast([*c]const u8, value));
                     } else {
                         @compileError("invalid type: '" ++ @typeName(T) ++ "'");
                     }
                 },
                 .C => {
                     if (@TypeOf(PointerInfo.child) == @TypeOf([]u8)) {
-                        _ = lua.lua_pushstring(self.L, value);
+                        _ = lua.lua_pushstring(L, value);
                     } else {
                         @compileError("invalid type: '" ++ @typeName(T) ++ "'");
                     }
                 },
             },
-            // .Fn => {
-            // },
+            .Fn => {
+                const funcType = @TypeOf(value);
+                const Args = std.meta.ArgsTuple(funcType);
+                const _ptr = @intCast(c_longlong, @ptrToInt(value));
+                lua.lua_pushinteger(L, _ptr);
+                std.log.info("Function ptr: {}", .{_ptr});
+
+                const cfun = struct {
+                    fn helper(_L: ?*lua.lua_State) callconv(.C) c_int {
+                        var args: Args = undefined;
+                        comptime var i = 0;
+                        inline while (i < args.len) : (i += 1) {
+                            args[i] = try pop(@TypeOf(args[i]), _L.?);
+                        }
+                        var isnum: i32 = 0;
+                        var ptr = lua.lua_tointegerx(_L, lua.lua_upvalueindex(1), isnum);
+                        std.log.info("Function ptr itten: {}", .{ptr});
+                        const func = @intToPtr(funcType, @intCast(usize,ptr));
+                        const result = @call(.{ }, func, args);
+                        if (@TypeOf(result) == void) {
+                            return 0;
+                        } else {
+                            push(_L, result);
+                            return 1;
+                        }
+                    }
+                }.helper;
+
+                lua.lua_pushcclosure(L, cfun, 1);
+            },
             // .Type => {
             // },
             else => @compileError("invalid type: '" ++ @typeName(@TypeOf(value)) ++ "'"),
         }
     }
 
-    fn pop(self: *LuaState, comptime T: type) !T {
-        defer lua.lua_pop(self.L, 1);
+    fn pop(comptime T: type, L: *lua.lua_State) !T {
+        defer lua.lua_pop(L, 1);
         switch (@typeInfo(T)) {
             .Bool => {
-                var res = lua.lua_toboolean(self.L, -1);
+                var res = lua.lua_toboolean(L, -1);
                 return if (res > 0) true else false;
             },
             .Int, .ComptimeInt => {
                 var isnum: i32 = 0;
-                var result: T = @intCast(T, lua.lua_tointegerx(self.L, -1, isnum));
+                var result: T = @intCast(T, lua.lua_tointegerx(L, -1, isnum));
                 return result;
             },
             .Float, .ComptimeFloat => {
                 var isnum: i32 = 0;
-                var result: T = @floatCast(T, lua.lua_tonumberx(self.L, -1, isnum));
+                var result: T = @floatCast(T, lua.lua_tonumberx(L, -1, isnum));
                 return result;
             },
             // Only string, allocless get (Lua holds the pointer, it is only a slice pointing to it)
@@ -219,7 +252,7 @@ const LuaState = struct {
                     if (PointerInfo.child == u8 and PointerInfo.is_const)
                     {
                         var len: usize = 0;
-                        var ptr = lua.lua_tolstring(self.L, -1, @ptrCast([*c]usize, &len));
+                        var ptr = lua.lua_tolstring(L, -1, @ptrCast([*c]usize, &len));
                         var result: T = ptr[0..len];
                         return result;
                     }
@@ -236,27 +269,27 @@ const LuaState = struct {
                 const fields_info = std.meta.fields(T);
                 inline while (i < fields_info.len) : (i += 1) {
                     //std.log.info("Parameter: {}: {} ({s})", .{i, args[i], fields_info[i].field_type});
-                    result[i] = self.pop(@TypeOf(result[i]));
+                    result[i] = pop(@TypeOf(result[i]), L);
                 }
             },
             else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
         }
     }
 
-    fn allocPop(self: *LuaState, comptime T: type) !T {
+    fn allocPop(comptime T: type, L: *lua.lua_State, allocator: *std.mem.Allocator) !T {
         switch (@typeInfo(T)) {
             .Pointer => |PointerInfo| switch (PointerInfo.size) {
                 .Slice => {
-                    defer lua.lua_pop(self.L, 1);
-                    if (lua.lua_type(self.L, -1) == lua.LUA_TTABLE) {
-                        lua.lua_len(self.L, -1);
-                        const len = try self.pop(u64);
-                        var res = try self.allocator.alloc(PointerInfo.child, @intCast(usize, len));
+                    defer lua.lua_pop(L, 1);
+                    if (lua.lua_type(L, -1) == lua.LUA_TTABLE) {
+                        lua.lua_len(L, -1);
+                        const len = try pop(u64, L);
+                        var res = try allocator.alloc(PointerInfo.child, @intCast(usize, len));
                         var i: u32 = 0;
                         while (i < len) : (i+=1) {
-                            self.push(i+1);
-                            _ = lua.lua_gettable(self.L, -2);
-                            res[i] = try self.pop(PointerInfo.child);
+                            push(L, i+1);
+                            _ = lua.lua_gettable(L, -2);
+                            res[i] = try pop(PointerInfo.child, L);
                         }
                         return res;
                     } else {
@@ -269,11 +302,11 @@ const LuaState = struct {
             .Struct => |_| {
                 comptime var idx = std.mem.indexOf(u8, @typeName(T), "LuaFunction") orelse -1;
                 if (idx == 0) {
-                    if (lua.lua_type(self.L, -1) == lua.LUA_TFUNCTION) {
-                        return T.init(self);
+                    if (lua.lua_type(L, -1) == lua.LUA_TFUNCTION) {
+                        return T.init(L, allocator);
                     }
                     else {
-                        defer lua.lua_pop(self.L, 1);
+                        defer lua.lua_pop(L, 1);
                         return error.bad_type;
                     }
                 }
@@ -430,7 +463,7 @@ test "set/get slice of primitive type (scalar, unmutable string)" {
     }
 }
 
-test "simple function call" {
+test "simple Zig => Lua function call" {
     var luaState = try LuaState.init(std.testing.allocator);
     defer luaState.destroy();
 
@@ -470,4 +503,23 @@ test "simple function call" {
 
     const res4 = try fun4.call(.{42, 24});
     try std.testing.expectEqual(res4, 66);
+}
+
+var testResult: i32 = 0;
+
+fn test_fun(a: i32, b: i32) void {
+    std.log.info("I'm a test: {}", .{a*b});
+    testResult = a*b;
+}
+
+test "simple Lua => Zig function call" {
+    var luaState = try LuaState.init(std.testing.allocator);
+    defer luaState.destroy();
+
+    luaState.openLibs();
+
+    luaState.set("test_fun", test_fun);
+
+    luaState.run("test_fun(3,15)");
+    try std.testing.expect(testResult == 45);
 }

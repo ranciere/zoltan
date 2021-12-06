@@ -39,7 +39,29 @@ var res = doubleMe.call(42);
 std.log.info("Result: {}", .{res});   // 84
 ```
 
+## Calling Zig function from Lua
+
+```
+var testResult: i32 = 0;
+
+fn test_fun(a: i32, b: i32) void {
+    std.log.info("I'm a test: {}", .{a*b});
+    testResult = a*b;
+}
+
+...
+
+var luaState = try LuaState.init(std.testing.allocator);
+defer luaState.destroy();
+
+luaState.set("test_fun", test_fun);
+
+luaState.run("test_fun(3,15)");
+try std.testing.expect(testResult == 45);
+
+```
+
 ## To be implemented
 
 - table support
-- export Zig method to Lua
+- registering Zig structs in Lua
