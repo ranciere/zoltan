@@ -25,6 +25,30 @@ const str = luaState.get([] const u8, "string");
 std.log.info("String: {s}", .{str});  // I'm a string
 ```
 
+## Handling Lua table
+```zig
+var luaState = try LuaState.init(std.testing.allocator);
+defer luaState.destroy();
+
+var tbl = try luaState.allocCreateTable();
+defer tbl.destroy();
+luaState.set("tbl", tbl);
+
+var inTbl = try luaState.allocCreateTable();
+defer inTbl.destroy();
+
+// Set, integer key
+inTbl.set(1, "string");
+inTbl.set(2, 3.1415);
+inTbl.set(3, 42);
+
+// Set, string key
+inTbl.set("bool", true);
+
+// Set table in parent
+tbl.set("inner", inTbl);
+```
+
 ## Calling Lua function from Zig
 ```zig
 var luaState = try LuaState.init(std.testing.allocator);
@@ -91,5 +115,4 @@ luaState.run(lua_command);
 
 ## To be implemented
 
-- table support
 - registering Zig structs in Lua
