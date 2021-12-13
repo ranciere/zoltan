@@ -411,7 +411,7 @@ const LuaState = struct {
                 .One => {
                     var optionalTbl = registeredTypes.get(@typeName(PointerInfo.child));
                     if (optionalTbl) |tbl| {
-                        var result = @ptrCast(T, @alignCast(@alignOf(PointerInfo.child), lua.luaL_checkudata(L, 1, @ptrCast([*c]const u8, tbl[0..]))));
+                        var result = @ptrCast(T, @alignCast(@alignOf(PointerInfo.child), lua.luaL_checkudata(L, -1, @ptrCast([*c]const u8, tbl[0..]))));
                         return result;
                     } else { 
                         return error.invalidType; 
@@ -687,18 +687,6 @@ pub fn main() anyerror!void {
     var luaState = try LuaState.init(&gpa.allocator);
     defer luaState.destroy();
     luaState.openLibs();
-
-    _ = try luaState.newUserType(TestStruct);
-
-    const cmd = 
-        \\print('Gyurika', TestStruct, TestStruct.new)
-        \\o2 = TestStruct.new(42); o3 = TestStruct.new(27)
-        \\res2 = o2:fun2(2,5)
-        \\res3 = o3:fun2(12,21)
-        \\print("Res", res2, o2, o2.fun2)
-        \\print('VEGE')
-    ;
-    luaState.run(cmd);
 }
 
 test "set/get scalar" {
@@ -1360,4 +1348,67 @@ test "Register custom types I: allocless in/out member functions arguments" {
 
     var resD2 = try getD.call(.{});
     try std.testing.expect(resD2 == false);
+}
+
+test "Registered user type as global without ownership" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var luaState = try LuaState.init(&gpa.allocator);
+    defer luaState.destroy();
+    luaState.openLibs();
+
+    _ = try luaState.newUserType(TestCustomTypes);
+
+    luaState.run("o = TestCustomTypes.new(42, 42.0, 'life', true)");
+
+    var ptr = try luaState.get(*TestCustomTypes, "o");
+
+    try std.testing.expect(ptr.a == 42);
+    try std.testing.expect(ptr.b == 42.0);
+    try std.testing.expect(std.mem.eql(u8, ptr.c, "life"));
+    try std.testing.expect(ptr.d == true);
+
+    luaState.run("o:reset()");
+
+    try std.testing.expect(ptr.a == 0);
+    try std.testing.expect(ptr.b == 0.0);
+    try std.testing.expect(std.mem.eql(u8, ptr.c, ""));
+    try std.testing.expect(ptr.d == false);
+}
+
+fn testCustomTypeSwap(ptr0: *TestCustomTypes, ptr1: *TestCustomTypes) void {
+    var tmp: TestCustomTypes = undefined;
+    tmp = ptr0.*;
+    ptr0.* = ptr1.*;
+    ptr1.* = tmp;
+}
+
+test "Zig function with registered user type arguments" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var luaState = try LuaState.init(&gpa.allocator);
+    defer luaState.destroy();
+    luaState.openLibs();
+
+    _ = try luaState.newUserType(TestCustomTypes);
+    luaState.set("swap", testCustomTypeSwap);
+
+    const cmd = 
+        \\o0 = TestCustomTypes.new(42, 42.0, 'life', true)
+        \\o1 = TestCustomTypes.new(0, 1.0, 'test', false)
+        \\swap(o0, o1)
+    ;
+
+    luaState.run(cmd);
+
+    var ptr0 = try luaState.get(*TestCustomTypes, "o0");
+    var ptr1 = try luaState.get(*TestCustomTypes, "o1");
+
+    try std.testing.expect(ptr0.a == 0);
+    try std.testing.expect(ptr0.b == 1.0);
+    try std.testing.expect(std.mem.eql(u8, ptr0.c, "test"));
+    try std.testing.expect(ptr0.d == false);
+
+    try std.testing.expect(ptr1.a == 42);
+    try std.testing.expect(ptr1.b == 42.0);
+    try std.testing.expect(std.mem.eql(u8, ptr1.c, "life"));
+    try std.testing.expect(ptr1.d == true);
 }
