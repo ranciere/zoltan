@@ -119,27 +119,24 @@ const LuaTable = struct {
         return try LuaState.pop(T, self.L);
     }
 
-    pub fn allocGet(self: *const Self, comptime T: type, key: anytype) !T {
+    pub fn getResource(self: *const Self, comptime T: type, key: anytype) !T {
         // Getting table reference
         _ = lua.lua_rawgeti(self.L, lua.LUA_REGISTRYINDEX, self.ref);
         // Push key
         LuaState.push(self.L, key);
         // Get
         _ = lua.lua_gettable(self.L, -2);
-        return try LuaState.allocPop(T, self.L, self.allocator);
+        return try LuaState.popResource(T, self.L, self.allocator);
     }
 };
+
+var registeredTypes: std.StringArrayHashMap([] const u8) = undefined;
 
 const LuaState = struct {
     L: *lua.lua_State,
     allocator: *std.mem.Allocator,
     //registeredTypes: std.ArrayList(std.builtin.TypeInfo),
-    registeredTypes: std.ArrayList([]const u8),
-
-    // const LuaTable: struct {
-    //     luaState: *LuaState,
-
-    // };
+    //
 
     pub fn init(allocator: *std.mem.Allocator) !LuaState {
         var _state = lua.lua_newstate(alloc, allocator) orelse return error.OutOfMemory;
@@ -147,8 +144,9 @@ const LuaState = struct {
         var state = LuaState{
             .L = _state,
             .allocator = allocator,
-            .registeredTypes = std.ArrayList([]const u8).init(allocator),
+            //.registeredTypes = std.StringArrayHashMap([] const u8).init(allocator),
         };
+        registeredTypes = std.StringArrayHashMap([] const u8).init(allocator);
         return state;
     }
 
@@ -201,20 +199,19 @@ const LuaState = struct {
         }
     }
 
-    pub fn allocGet(self: *LuaState, comptime T: type, name: []const u8) !T {
+    pub fn getResource(self: *LuaState, comptime T: type, name: []const u8) !T {
         const typ = lua.lua_getglobal(self.L, @ptrCast([*c]const u8, name));
         if (typ != lua.LUA_TNIL) {
-            return try allocPop(T, self.L, self.allocator);
+            return try popResource(T, self.L, self.allocator);
         } else {
             return error.novalue;
         }
     }
 
-    pub fn allocCreateTable(self: *LuaState) !LuaTable {
+    pub fn createTableResource(self: *LuaState) !LuaTable {
         _ = lua.lua_createtable(self.L, 0, 0);
-        return try allocPop(LuaTable, self.L, self.allocator);
+        return try popResource(LuaTable, self.L, self.allocator);
     }
-
 
     pub fn newUserType(self: *LuaState, comptime T: type) !void {
         comptime var hasInit: bool = false;
@@ -225,7 +222,7 @@ const LuaState = struct {
         comptime var allocFuns = struct {
             fn new(L: ?*lua.lua_State) callconv(.C) c_int {
                 // (1) get arguments
-                var caller = ZigCallHelper(@TypeOf(T.init), null).LowLevelHelpers.init();
+                var caller = ZigCallHelper(@TypeOf(T.init)).LowLevelHelpers.init();
                 caller.prepareArgs(L) catch unreachable;
 
                 // (2) create Lua object
@@ -276,13 +273,13 @@ const LuaState = struct {
                                 hasDestroy = true;
                             } else if (decl.is_pub) {
                                 comptime var field = @field(T, decl.name);
-                                const Caller = ZigCallHelper(@TypeOf(field), metaTblName[0..]);
+                                const Caller = ZigCallHelper(@TypeOf(field));
                                 std.log.info("\t{s}: {s} at {}", .{ decl.name, @typeName(FnInfo.fn_type), @ptrToInt(field) });
                                 const ArgsType = std.meta.ArgsTuple(FnInfo.fn_type);
                                 var args: ArgsType = undefined;
                                 std.log.info("\tRegistering method: {s}", .{@typeName(@TypeOf(args[0]))});
                                 //std.log.info("\tBaszataska: {s}", .{@typeName(ArgsType.@"0")});
-                                Caller.pushAsMemberMethod(self.L, field) catch unreachable;
+                                Caller.pushFunctor(self.L, field) catch unreachable;
                                 lua.lua_setfield(self.L, -2, @ptrCast([*c]const u8, decl.name));
 
                             }
@@ -304,9 +301,11 @@ const LuaState = struct {
         lua.lua_pushcclosure(self.L, allocFuns.new, 0);
         lua.lua_setfield(self.L, -2, "new");
 
-
         // Set as global ('require' requires luaopen_{libraname} named static C functionsa and we don't want to provide one)
         _ = lua.lua_setglobal(self.L, @ptrCast([*c]const u8, metaTblName[0..]));
+
+        // Store in the registry
+        try registeredTypes.put(@typeName(T), metaTblName[0..]);
     }
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -361,8 +360,8 @@ const LuaState = struct {
                 },
             },
             .Fn => {
-                const Helper = ZigCallHelper(@TypeOf(value), null);
-                Helper.pushAsFunctor(L, value) catch unreachable;
+                const Helper = ZigCallHelper(@TypeOf(value));
+                Helper.pushFunctor(L, value) catch unreachable;
             },
             .Struct => |_| {
                 comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "LuaFunction") orelse -1;
@@ -405,6 +404,15 @@ const LuaState = struct {
                         return result;
                     } else @compileError("Only '[]const u8' (aka string) is supported allocless.");
                 },
+                .One => {
+                    var optionalTbl = registeredTypes.get(@typeName(PointerInfo.child));
+                    if (optionalTbl) |tbl| {
+                        var result = @ptrCast(T, @alignCast(@alignOf(PointerInfo.child), lua.luaL_checkudata(L, 1, @ptrCast([*c]const u8, tbl[0..]))));
+                        return result;
+                    } else { 
+                        return error.invalidType; 
+                    }
+                },
                 else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
             },
             .Struct => |StructInfo| {
@@ -428,7 +436,7 @@ const LuaState = struct {
         }
     }
 
-    fn allocPop(comptime T: type, L: *lua.lua_State, allocator: *std.mem.Allocator) !T {
+    fn popResource(comptime T: type, L: *lua.lua_State, allocator: *std.mem.Allocator) !T {
         switch (@typeInfo(T)) {
             .Pointer => |PointerInfo| switch (PointerInfo.size) {
                 .Slice => {
@@ -509,7 +517,7 @@ const LuaState = struct {
         }
     }
 
-    fn ZigCallHelper(comptime funcType: type, comptime metaTblName: ?[]const u8) type {
+    fn ZigCallHelper(comptime funcType: type) type {
         const info = @typeInfo(funcType);
         if (info != .Fn) {
             @compileError("ZigCallHelper expects a function type");
@@ -518,7 +526,6 @@ const LuaState = struct {
         const ReturnType = info.Fn.return_type.?;
         const ArgTypes = std.meta.ArgsTuple(funcType);
         const resultCnt = if (ReturnType == void) 0 else 1;
-        const prepareArgCond = if (metaTblName) |_| 0 else -1;
 
         return struct {
             pub const LowLevelHelpers = struct {
@@ -534,11 +541,11 @@ const LuaState = struct {
                 fn prepareArgs(self: *Self, L: ?*lua.lua_State) !void {
                     // Prepare arguments
                     comptime var i = self.args.len - 1;
-                    inline while (i > prepareArgCond) : (i -= 1) {
+                    inline while (i > -1) : (i -= 1) {
                         if (comptime allocateDeallocateHelper(@TypeOf(self.args[i]), false, null, null)) {
-                            self.args[i] = allocPop(@TypeOf(self.args[i]), L.?, luaAllocator) catch unreachable;
+                            self.args[i] = popResource(@TypeOf(self.args[i]), L.?, luaAllocator) catch unreachable;
                         } else {
-                            self.args[i] = try pop(@TypeOf(self.args[i]), L.?);
+                            self.args[i] = pop(@TypeOf(self.args[i]), L.?) catch unreachable;
                         }
                     }
                 }
@@ -562,9 +569,7 @@ const LuaState = struct {
                 }
             };
 
-            pub fn pushAsFunctor(L: ?*lua.lua_State, func: funcType) !void {
-                if (metaTblName) |_|
-                    @compileError("Pushing member functor requires proper init (method argument is true.");
+            pub fn pushFunctor(L: ?*lua.lua_State, func: funcType) !void {
                 const funcPtrAsInt = @intCast(c_longlong, @ptrToInt(func));
                 lua.lua_pushinteger(L, funcPtrAsInt);
                 std.log.info("[Functor] Function ptr: {}", .{funcPtrAsInt});
@@ -586,37 +591,6 @@ const LuaState = struct {
                 }.helper;
                 lua.lua_pushcclosure(L, cfun, 1);
             }
-
-            pub fn pushAsMemberMethod(L: ?*lua.lua_State, func: funcType) !void {
-                if (metaTblName == null)
-                    @compileError("Pushing member method requires proper init (method argument is false.");
-                const funcPtrAsInt = @intCast(c_longlong, @ptrToInt(func));
-                lua.lua_pushinteger(L, funcPtrAsInt);
-                std.log.info("[Member method] Function ptr: {}", .{funcPtrAsInt});
-
-                const cfun = struct {
-                    fn helper(_L: ?*lua.lua_State) callconv(.C) c_int {
-                        var f: LowLevelHelpers = undefined;
-                        // Prepare arguments from stack
-                        f.prepareArgs(_L) catch unreachable;
-                        // Get object ptr
-                        const SelfType = @TypeOf(f.args[0]);
-                        //@compileLog("SelfType: " ++ @typeName(SelfType));
-                        f.args[0] = @ptrCast(SelfType, @alignCast(@alignOf(SelfType), lua.luaL_checkudata(_L, 1, @ptrCast([*c]const u8, metaTblName.?))));
-                        lua.lua_pop(_L, 1);
-                        // Get func pointer upvalue as int => convert to func ptr then call
-                        var ptr = lua.lua_tointegerx(_L, lua.lua_upvalueindex(1), null);
-                        f.call(@intToPtr(funcType, @intCast(usize, ptr))) catch unreachable;
-                        // The end
-                        f.pushResult(_L) catch unreachable;
-                        // Release arguments
-                        f.destroyArgs() catch unreachable;
-                        return resultCnt;
-                    }
-                }.helper;
-                lua.lua_pushcclosure(L, cfun, 1);
-            }
-
         };
     }
 
@@ -687,6 +661,22 @@ const mucuka = struct {
     a: i32 = 42,
     b: bool = true,
 };
+
+fn LuaRef(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        luaRef: c_int,
+        ptr: T,
+
+        fn init(_ref: c_int, _ptr: *T) Self {
+            return Self {
+                .luaRef = _ref,
+                .ptr = _ptr,
+            };
+        }
+    };
+}
 
 pub fn main() anyerror!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -857,13 +847,13 @@ test "set/get slice of primitive type (scalar, unmutable string)" {
     luaState.set("intSlice", intSlice);
     luaState.set("strSlice", strSlice);
 
-    const retBoolSlice = try luaState.allocGet([]i32, "boolSlice");
+    const retBoolSlice = try luaState.getResource([]i32, "boolSlice");
     defer std.testing.allocator.free(retBoolSlice);
 
-    const retIntSlice = try luaState.allocGet([]i32, "intSlice");
+    const retIntSlice = try luaState.getResource([]i32, "intSlice");
     defer std.testing.allocator.free(retIntSlice);
 
-    const retStrSlice = try luaState.allocGet([][]const u8, "strSlice");
+    const retStrSlice = try luaState.getResource([][]const u8, "strSlice");
     defer std.testing.allocator.free(retStrSlice);
 
     for (retIntSlice) |v, i| {
@@ -890,19 +880,19 @@ test "simple Zig => Lua function call" {
 
     luaState.run(lua_command);
 
-    var fun1 = try luaState.allocGet(LuaFunction(fn () void), "test_1");
+    var fun1 = try luaState.getResource(LuaFunction(fn () void), "test_1");
     defer fun1.destroy();
 
-    var fun2 = try luaState.allocGet(LuaFunction(fn (a: i32) void), "test_2");
+    var fun2 = try luaState.getResource(LuaFunction(fn (a: i32) void), "test_2");
     defer fun2.destroy();
 
-    var fun3_1 = try luaState.allocGet(LuaFunction(fn (a: i32) i32), "test_3");
+    var fun3_1 = try luaState.getResource(LuaFunction(fn (a: i32) i32), "test_3");
     defer fun3_1.destroy();
 
-    var fun3_2 = try luaState.allocGet(LuaFunction(fn (a: []const u8) []const u8), "test_3");
+    var fun3_2 = try luaState.getResource(LuaFunction(fn (a: []const u8) []const u8), "test_3");
     defer fun3_2.destroy();
 
-    var fun4 = try luaState.allocGet(LuaFunction(fn (a: i32, b: i32) i32), "test_4");
+    var fun4 = try luaState.getResource(LuaFunction(fn (a: i32, b: i32) i32), "test_4");
     defer fun4.destroy();
 
     try fun1.call(.{});
@@ -1003,10 +993,10 @@ test "simple Zig => Lua => Zig function call" {
     luaState.run("function luaTestFun4(a) return testFun4(a); end");
     luaState.run("function luaTestFun5(a,b) return testFun5(a,b); end");
 
-    var fun4 = try luaState.allocGet(LuaFunction(fn (a: []const u8) []const u8), "luaTestFun4");
+    var fun4 = try luaState.getResource(LuaFunction(fn (a: []const u8) []const u8), "luaTestFun4");
     defer fun4.destroy();
 
-    var fun5 = try luaState.allocGet(LuaFunction(fn (a: i32, b: i32) i32), "luaTestFun5");
+    var fun5 = try luaState.getResource(LuaFunction(fn (a: i32, b: i32) i32), "luaTestFun5");
     defer fun5.destroy();
 
     var res4 = try fun4.call(.{"macika"});
@@ -1028,7 +1018,7 @@ test "Lua function injection into Zig function" {
     luaState.openLibs();
     // Binding on Zig side
     luaState.run("function getInt(a) return a+1; end");
-    var luafun = try luaState.allocGet(LuaFunction(fn (a: i32) i32), "getInt");
+    var luafun = try luaState.getResource(LuaFunction(fn (a: i32) i32), "getInt");
     defer luafun.destroy();
 
     var result = testLuaInnerFun(luafun);
@@ -1097,13 +1087,13 @@ test "LuaTable allocless set/get tests" {
     luaState.openLibs();
 
     // Create table
-    var originalTbl = try luaState.allocCreateTable();
+    var originalTbl = try luaState.createTableResource();
     defer originalTbl.destroy();
     luaState.set("tbl", originalTbl);
 
     originalTbl.set("owner", true);
 
-    var tbl = try luaState.allocGet(LuaTable, "tbl");
+    var tbl = try luaState.getResource(LuaTable, "tbl");
     defer tbl.destroy();
 
     const owner = try tbl.get(bool, "owner");
@@ -1169,14 +1159,14 @@ test "LuaTable inner table tests" {
     luaState.openLibs();
 
     // Create table
-    var tbl = try luaState.allocCreateTable();
+    var tbl = try luaState.createTableResource();
     defer tbl.destroy();
     luaState.set("tbl", tbl);
 
-    var inTbl0 = try luaState.allocCreateTable();
+    var inTbl0 = try luaState.createTableResource();
     defer inTbl0.destroy();
 
-    var inTbl1 = try luaState.allocCreateTable();
+    var inTbl1 = try luaState.createTableResource();
     defer inTbl0.destroy();
 
     inTbl1.set("str", "string");
@@ -1190,10 +1180,10 @@ test "LuaTable inner table tests" {
 
     tbl.set("innerTable", inTbl0);
 
-    var retTbl = try luaState.allocGet(LuaTable, "tbl");
+    var retTbl = try luaState.getResource(LuaTable, "tbl");
     defer retTbl.destroy();
 
-    var retInnerTable = try retTbl.allocGet(LuaTable, "innerTable");
+    var retInnerTable = try retTbl.getResource(LuaTable, "innerTable");
     defer retInnerTable.destroy();
 
     var str = try retInnerTable.get([]const u8, 1);
@@ -1204,12 +1194,12 @@ test "LuaTable inner table tests" {
     try std.testing.expect(float == 3.1415);
     try std.testing.expect(int == 42);
 
-    var retInner2Table = try retInnerTable.allocGet(LuaTable, "table");
+    var retInner2Table = try retInnerTable.getResource(LuaTable, "table");
     defer retInner2Table.destroy();
 
     str = try retInner2Table.get([]const u8, "str");
     int = try retInner2Table.get(i32, "int32");
-    var func = try retInner2Table.allocGet(LuaFunction(fn (a: i32) i32), "fn");
+    var func = try retInner2Table.getResource(LuaFunction(fn (a: i32) i32), "fn");
     defer func.destroy();
     var funcRes = try func.call(.{42});
 
@@ -1232,7 +1222,7 @@ test "Function with LuaTable argument" {
 
     luaState.openLibs();
     // Zig side
-    var tbl = try luaState.allocCreateTable();
+    var tbl = try luaState.createTableResource();
     defer tbl.destroy();
 
     tbl.set("a", 42);
@@ -1245,7 +1235,7 @@ test "Function with LuaTable argument" {
     luaState.set("sumFn", testLuaTableArg);
     luaState.run("function test() return sumFn({a=1, b=2}); end");
 
-    var luaFun = try luaState.allocGet(LuaFunction(fn () i32), "test");
+    var luaFun = try luaState.getResource(LuaFunction(fn () i32), "test");
     defer luaFun.destroy();
 
     var luaRes = try luaFun.call(.{});
@@ -1265,7 +1255,7 @@ test "Function with LuaTable result" {
     luaState.openLibs();
     luaState.injectPrettyPrint();
     // Zig side
-    var tbl = try luaState.allocCreateTable();
+    var tbl = try luaState.createTableResource();
     defer tbl.destroy();
 
     var zigRes = testLuaTableArgOut(tbl);
@@ -1280,7 +1270,7 @@ test "Function with LuaTable result" {
     //luaState.run("function test() tbl = tblFn({}); return tbl[1] + tbl[2]; end");
     luaState.run("function test() tbl = tblFn({}); return tbl[1] + tbl[2]; end");
 
-    var luaFun = try luaState.allocGet(LuaFunction(fn () i32), "test");
+    var luaFun = try luaState.getResource(LuaFunction(fn () i32), "test");
     defer luaFun.destroy();
 
     var luaRes = try luaFun.call(.{});
@@ -1357,22 +1347,22 @@ test "Register custom types I: allocless in/out member functions arguments" {
     ;
     luaState.run(cmd);
 
-    var getA = try luaState.allocGet(LuaFunction(fn() i32), "getA");
+    var getA = try luaState.getResource(LuaFunction(fn() i32), "getA");
     defer getA.destroy();
 
-    var getB = try luaState.allocGet(LuaFunction(fn() f32), "getB");
+    var getB = try luaState.getResource(LuaFunction(fn() f32), "getB");
     defer getB.destroy();
 
-    var getC = try luaState.allocGet(LuaFunction(fn() [] const u8), "getC");
+    var getC = try luaState.getResource(LuaFunction(fn() [] const u8), "getC");
     defer getC.destroy();
 
-    var getD = try luaState.allocGet(LuaFunction(fn() bool), "getD");
+    var getD = try luaState.getResource(LuaFunction(fn() bool), "getD");
     defer getD.destroy();
 
-    var reset = try luaState.allocGet(LuaFunction(fn() void), "reset");
+    var reset = try luaState.getResource(LuaFunction(fn() void), "reset");
     defer reset.destroy();
 
-    var store = try luaState.allocGet(LuaFunction(fn(_a: i32, _b: f32, _c: []const u8, _d: bool) void), "store");
+    var store = try luaState.getResource(LuaFunction(fn(_a: i32, _b: f32, _c: []const u8, _d: bool) void), "store");
     defer store.destroy();
 
     var resA0 = try getA.call(.{});
