@@ -213,6 +213,10 @@ const LuaState = struct {
         return try popResource(LuaTable, self.L, self.allocator);
     }
 
+    pub fn release(self: *LuaState, v: anytype) void {
+        _ = allocateDeallocateHelper(@TypeOf(v), true, self.allocator, v);
+    }
+    
     pub fn newUserType(self: *LuaState, comptime T: type) !void {
         comptime var hasInit: bool = false;
         comptime var hasDestroy: bool = false;
@@ -695,55 +699,6 @@ pub fn main() anyerror!void {
         \\print('VEGE')
     ;
     luaState.run(cmd);
-
-    // var v: mucuka = mucuka{};
-    // std.log.info("a: {}", .{v.a});
-
-    // var vp = try gpa.allocator.alloc(mucuka, 1);
-    // std.log.info("ap: {}", .{vp[0].a});
-
-    // //const zzzArray = [_] zzz{zzz{.name = "Bela", .id = 5}};
-
-    // const funcs = [_]lua.luaL_Reg{
-    //     lua.luaL_Reg{ .name = "new", .func = newlib },
-    //     lua.luaL_Reg{ .name = null, .func = null },
-    // };
-
-    // const methods = [_]lua.luaL_Reg{
-    //     lua.luaL_Reg{ .name = "tst", .func = tstfun },
-    //     lua.luaL_Reg{ .name = "__gc", .func = destroy_lib },
-    //     lua.luaL_Reg{ .name = null, .func = null },
-    // };
-
-    // // Create metatable
-    // _ = lua.luaL_newmetatable(luaState.L, "meta_ziglib");
-    // // Metatable.__index = metatable
-    // lua.lua_pushvalue(luaState.L, -1);
-    // lua.lua_setfield(luaState.L, -2, "__index");
-
-    // lua.luaL_setfuncs(luaState.L, &methods, 0);
-    // // <==_ = lua.luaL_newlib(luaState.L, &arraylib_f); ==>
-    // {
-    //     lua.luaL_checkversion(luaState.L);
-    //     lua.lua_createtable(luaState.L, 0, funcs.len - 1);
-    //     lua.luaL_setfuncs(luaState.L, &funcs, 0);
-    // }
-    // // Set as global (require requires luaopen_{libraname} named static C functions, we don't have)
-    // _ = lua.lua_setglobal(luaState.L, @ptrCast([*c]const u8, "ziglib"));
-    // luaState.run("print('Bela', ziglib, ziglib.new, ziglib.tst)");
-    // luaState.run("o0 = ziglib.new(); o1 = ziglib.new()");
-    // luaState.run("o1:tst()");
-    // luaState.run("o0:tst()");
-    // luaState.run("print('----------------------------------------------------------------')");
-
-    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    // var luaState = try LuaState.init(&gpa.allocator);
-    // defer luaState.destroy();
-
-    // luaState.openLibs();
-    // luaState.injectPrettyPrint();
-
-    // std.log.info("Main / Init: {}", .{@ptrToInt(TestStruct.init)});
 }
 
 test "set/get scalar" {
@@ -848,13 +803,13 @@ test "set/get slice of primitive type (scalar, unmutable string)" {
     luaState.set("strSlice", strSlice);
 
     const retBoolSlice = try luaState.getResource([]i32, "boolSlice");
-    defer std.testing.allocator.free(retBoolSlice);
+    defer luaState.release(retBoolSlice);
 
     const retIntSlice = try luaState.getResource([]i32, "intSlice");
-    defer std.testing.allocator.free(retIntSlice);
+    defer luaState.release(retIntSlice);
 
     const retStrSlice = try luaState.getResource([][]const u8, "strSlice");
-    defer std.testing.allocator.free(retStrSlice);
+    defer luaState.release(retStrSlice);
 
     for (retIntSlice) |v, i| {
         try std.testing.expectEqual(v, intSlice[i]);
@@ -881,19 +836,19 @@ test "simple Zig => Lua function call" {
     luaState.run(lua_command);
 
     var fun1 = try luaState.getResource(LuaFunction(fn () void), "test_1");
-    defer fun1.destroy();
+    defer luaState.release(fun1);
 
     var fun2 = try luaState.getResource(LuaFunction(fn (a: i32) void), "test_2");
-    defer fun2.destroy();
+    defer luaState.release(fun2);
 
     var fun3_1 = try luaState.getResource(LuaFunction(fn (a: i32) i32), "test_3");
-    defer fun3_1.destroy();
+    defer luaState.release(fun3_1);
 
     var fun3_2 = try luaState.getResource(LuaFunction(fn (a: []const u8) []const u8), "test_3");
-    defer fun3_2.destroy();
+    defer luaState.release(fun3_2);
 
     var fun4 = try luaState.getResource(LuaFunction(fn (a: i32, b: i32) i32), "test_4");
-    defer fun4.destroy();
+    defer luaState.release(fun4);
 
     try fun1.call(.{});
     try fun2.call(.{42});
@@ -994,10 +949,10 @@ test "simple Zig => Lua => Zig function call" {
     luaState.run("function luaTestFun5(a,b) return testFun5(a,b); end");
 
     var fun4 = try luaState.getResource(LuaFunction(fn (a: []const u8) []const u8), "luaTestFun4");
-    defer fun4.destroy();
+    defer luaState.release(fun4);
 
     var fun5 = try luaState.getResource(LuaFunction(fn (a: i32, b: i32) i32), "luaTestFun5");
-    defer fun5.destroy();
+    defer luaState.release(fun5);
 
     var res4 = try fun4.call(.{"macika"});
     var res5 = try fun5.call(.{ 42, 1 });
@@ -1019,7 +974,7 @@ test "Lua function injection into Zig function" {
     // Binding on Zig side
     luaState.run("function getInt(a) return a+1; end");
     var luafun = try luaState.getResource(LuaFunction(fn (a: i32) i32), "getInt");
-    defer luafun.destroy();
+    defer luaState.release(luafun);
 
     var result = testLuaInnerFun(luafun);
     std.log.info("Zig Result: {}", .{result});
@@ -1094,7 +1049,7 @@ test "LuaTable allocless set/get tests" {
     originalTbl.set("owner", true);
 
     var tbl = try luaState.getResource(LuaTable, "tbl");
-    defer tbl.destroy();
+    defer luaState.release(tbl);
 
     const owner = try tbl.get(bool, "owner");
     try std.testing.expect(owner);
@@ -1160,14 +1115,15 @@ test "LuaTable inner table tests" {
 
     // Create table
     var tbl = try luaState.createTableResource();
-    defer tbl.destroy();
+    defer luaState.release(tbl);
+
     luaState.set("tbl", tbl);
 
     var inTbl0 = try luaState.createTableResource();
-    defer inTbl0.destroy();
+    defer luaState.release(inTbl0);
 
     var inTbl1 = try luaState.createTableResource();
-    defer inTbl0.destroy();
+    defer luaState.release(inTbl1);
 
     inTbl1.set("str", "string");
     inTbl1.set("int32", 68);
@@ -1181,10 +1137,10 @@ test "LuaTable inner table tests" {
     tbl.set("innerTable", inTbl0);
 
     var retTbl = try luaState.getResource(LuaTable, "tbl");
-    defer retTbl.destroy();
+    defer luaState.release(retTbl);
 
     var retInnerTable = try retTbl.getResource(LuaTable, "innerTable");
-    defer retInnerTable.destroy();
+    defer luaState.release(retInnerTable);
 
     var str = try retInnerTable.get([]const u8, 1);
     var float = try retInnerTable.get(f32, 2);
@@ -1195,12 +1151,12 @@ test "LuaTable inner table tests" {
     try std.testing.expect(int == 42);
 
     var retInner2Table = try retInnerTable.getResource(LuaTable, "table");
-    defer retInner2Table.destroy();
+    defer luaState.release(retInner2Table);
 
     str = try retInner2Table.get([]const u8, "str");
     int = try retInner2Table.get(i32, "int32");
     var func = try retInner2Table.getResource(LuaFunction(fn (a: i32) i32), "fn");
-    defer func.destroy();
+    defer luaState.release(func);
     var funcRes = try func.call(.{42});
 
     try std.testing.expect(std.mem.eql(u8, str, "string"));
@@ -1223,7 +1179,7 @@ test "Function with LuaTable argument" {
     luaState.openLibs();
     // Zig side
     var tbl = try luaState.createTableResource();
-    defer tbl.destroy();
+    defer luaState.release(tbl);
 
     tbl.set("a", 42);
     tbl.set("b", 128);
@@ -1236,7 +1192,7 @@ test "Function with LuaTable argument" {
     luaState.run("function test() return sumFn({a=1, b=2}); end");
 
     var luaFun = try luaState.getResource(LuaFunction(fn () i32), "test");
-    defer luaFun.destroy();
+    defer luaState.release(luaFun);
 
     var luaRes = try luaFun.call(.{});
     try std.testing.expect(luaRes == 1 + 2);
@@ -1256,7 +1212,7 @@ test "Function with LuaTable result" {
     luaState.injectPrettyPrint();
     // Zig side
     var tbl = try luaState.createTableResource();
-    defer tbl.destroy();
+    defer luaState.release(tbl);
 
     var zigRes = testLuaTableArgOut(tbl);
 
@@ -1271,7 +1227,7 @@ test "Function with LuaTable result" {
     luaState.run("function test() tbl = tblFn({}); return tbl[1] + tbl[2]; end");
 
     var luaFun = try luaState.getResource(LuaFunction(fn () i32), "test");
-    defer luaFun.destroy();
+    defer luaState.release(luaFun);
 
     var luaRes = try luaFun.call(.{});
     try std.testing.expect(luaRes == 42 + 128);
@@ -1348,22 +1304,22 @@ test "Register custom types I: allocless in/out member functions arguments" {
     luaState.run(cmd);
 
     var getA = try luaState.getResource(LuaFunction(fn() i32), "getA");
-    defer getA.destroy();
+    defer luaState.release(getA);
 
     var getB = try luaState.getResource(LuaFunction(fn() f32), "getB");
-    defer getB.destroy();
+    defer luaState.release(getB);
 
     var getC = try luaState.getResource(LuaFunction(fn() [] const u8), "getC");
-    defer getC.destroy();
+    defer luaState.release(getC);
 
     var getD = try luaState.getResource(LuaFunction(fn() bool), "getD");
-    defer getD.destroy();
+    defer luaState.release(getD);
 
     var reset = try luaState.getResource(LuaFunction(fn() void), "reset");
-    defer reset.destroy();
+    defer luaState.release(reset);
 
     var store = try luaState.getResource(LuaFunction(fn(_a: i32, _b: f32, _c: []const u8, _d: bool) void), "store");
-    defer store.destroy();
+    defer luaState.release(store);
 
     var resA0 = try getA.call(.{});
     try std.testing.expect(resA0 == 42);
@@ -1404,5 +1360,4 @@ test "Register custom types I: allocless in/out member functions arguments" {
 
     var resD2 = try getD.call(.{});
     try std.testing.expect(resD2 == false);
-
 }
