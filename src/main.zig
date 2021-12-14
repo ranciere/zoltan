@@ -9,127 +9,6 @@ pub const lua = @cImport({
     @cInclude("lualib.h");
 });
 
-fn LuaFunction(comptime T: type) type {
-    const FuncType = T;
-    const RetType =
-        switch (@typeInfo(FuncType)) {
-        .Fn => |FunctionInfo| FunctionInfo.return_type,
-        else => @compileError("Unsupported type."),
-    };
-    return struct {
-        const Self = @This();
-
-        L: *lua.lua_State,
-        allocator: *std.mem.Allocator,
-        ref: c_int = undefined,
-        func: FuncType = undefined,
-
-        // This 'Init' assumes, that the top element of the stack is a Lua function
-        fn init(_L: *lua.lua_State, _allocator: *std.mem.Allocator) Self {
-            const _ref = lua.luaL_ref(_L, lua.LUA_REGISTRYINDEX);
-            var res = Self{
-                .L = _L,
-                .allocator = _allocator,
-                .ref = _ref,
-            };
-            return res;
-        }
-
-        fn destroy(self: *const Self) void {
-            lua.luaL_unref(self.L, lua.LUA_REGISTRYINDEX, self.ref);
-        }
-
-        fn call(self: *const Self, args: anytype) !RetType.? {
-            const ArgsType = @TypeOf(args);
-            if (@typeInfo(ArgsType) != .Struct) {
-                ("Expected tuple or struct argument, found " ++ @typeName(ArgsType));
-            }
-            // Getting function reference
-            _ = lua.lua_rawgeti(self.L, lua.LUA_REGISTRYINDEX, self.ref);
-            // Preparing arguments
-            comptime var i = 0;
-            const fields_info = std.meta.fields(ArgsType);
-            inline while (i < fields_info.len) : (i += 1) {
-                //std.log.info("Parameter: {}: {} ({s})", .{i, args[i], fields_info[i].field_type});
-                LuaState.push(self.L, args[i]);
-            }
-            // Calculating retval count
-            comptime var retValCount = switch (@typeInfo(RetType.?)) {
-                .Void => 0,
-                .Struct => |StructInfo| StructInfo.fields.len,
-                else => 1,
-            };
-            // Calling
-            if (lua.lua_pcallk(self.L, fields_info.len, retValCount, 0, 0, null) != lua.LUA_OK) {
-                return error.lua_runtime_error;
-            }
-            // Getting return value(s)
-            if (retValCount > 0) {
-                return LuaState.pop(RetType.?, self.L);
-            }
-        }
-    };
-}
-
-const LuaTable = struct {
-    const Self = @This();
-
-    L: *lua.lua_State,
-    allocator: *std.mem.Allocator,
-    ref: c_int = undefined,
-
-    // This 'Init' assumes, that the top element of the stack is a Lua table
-    pub fn init(_L: *lua.lua_State, _allocator: *std.mem.Allocator) Self {
-        const _ref = lua.luaL_ref(_L, lua.LUA_REGISTRYINDEX);
-        var res = Self{
-            .L = _L,
-            .allocator = _allocator,
-            .ref = _ref,
-        };
-        return res;
-    }
-
-    // Unregister this shit
-    pub fn destroy(self: *const Self) void {
-        lua.luaL_unref(self.L, lua.LUA_REGISTRYINDEX, self.ref);
-    }
-
-    pub fn reference(self: *const Self) Self {
-        _ = lua.lua_rawgeti(self.L, lua.LUA_REGISTRYINDEX, self.ref);
-        return init(self.L, self.allocator);
-    }
-
-    pub fn set(self: *const Self, key: anytype, value: anytype) void {
-        // Getting table reference
-        _ = lua.lua_rawgeti(self.L, lua.LUA_REGISTRYINDEX, self.ref);
-        // Push key, value
-        LuaState.push(self.L, key);
-        LuaState.push(self.L, value);
-        // Set
-        lua.lua_settable(self.L, -3);
-    }
-
-    pub fn get(self: *const Self, comptime T: type, key: anytype) !T {
-        // Getting table by reference
-        _ = lua.lua_rawgeti(self.L, lua.LUA_REGISTRYINDEX, self.ref);
-        // Push key
-        LuaState.push(self.L, key);
-        // Get
-        _ = lua.lua_gettable(self.L, -2);
-        return try LuaState.pop(T, self.L);
-    }
-
-    pub fn getResource(self: *const Self, comptime T: type, key: anytype) !T {
-        // Getting table reference
-        _ = lua.lua_rawgeti(self.L, lua.LUA_REGISTRYINDEX, self.ref);
-        // Push key
-        LuaState.push(self.L, key);
-        // Get
-        _ = lua.lua_gettable(self.L, -2);
-        return try LuaState.popResource(T, self.L, self.allocator);
-    }
-};
-
 var registeredTypes: std.StringArrayHashMap([] const u8) = undefined;
 
 const LuaState = struct {
@@ -208,9 +87,9 @@ const LuaState = struct {
         }
     }
 
-    pub fn createTableResource(self: *LuaState) !LuaTable {
+    pub fn createTableResource(self: *LuaState) !LuaState.LuaTable {
         _ = lua.lua_createtable(self.L, 0, 0);
-        return try popResource(LuaTable, self.L, self.allocator);
+        return try popResource(LuaState.LuaTable, self.L, self.allocator);
     }
 
     pub fn release(self: *LuaState, v: anytype) void {
@@ -310,6 +189,143 @@ const LuaState = struct {
 
         // Store in the registry
         try registeredTypes.put(@typeName(T), metaTblName[0..]);
+    }
+
+    fn LuaFunction(comptime T: type) type {
+        const FuncType = T;
+        const RetType =
+            switch (@typeInfo(FuncType)) {
+            .Fn => |FunctionInfo| FunctionInfo.return_type,
+            else => @compileError("Unsupported type."),
+        };
+        return struct {
+            const Self = @This();
+
+            L: *lua.lua_State,
+            allocator: *std.mem.Allocator,
+            ref: c_int = undefined,
+            func: FuncType = undefined,
+
+            // This 'Init' assumes, that the top element of the stack is a Lua function
+            fn init(_L: *lua.lua_State, _allocator: *std.mem.Allocator) Self {
+                const _ref = lua.luaL_ref(_L, lua.LUA_REGISTRYINDEX);
+                var res = Self{
+                    .L = _L,
+                    .allocator = _allocator,
+                    .ref = _ref,
+                };
+                return res;
+            }
+
+            fn destroy(self: *const Self) void {
+                lua.luaL_unref(self.L, lua.LUA_REGISTRYINDEX, self.ref);
+            }
+
+            fn call(self: *const Self, args: anytype) !RetType.? {
+                const ArgsType = @TypeOf(args);
+                if (@typeInfo(ArgsType) != .Struct) {
+                    ("Expected tuple or struct argument, found " ++ @typeName(ArgsType));
+                }
+                // Getting function reference
+                _ = lua.lua_rawgeti(self.L, lua.LUA_REGISTRYINDEX, self.ref);
+                // Preparing arguments
+                comptime var i = 0;
+                const fields_info = std.meta.fields(ArgsType);
+                inline while (i < fields_info.len) : (i += 1) {
+                    //std.log.info("Parameter: {}: {} ({s})", .{i, args[i], fields_info[i].field_type});
+                    LuaState.push(self.L, args[i]);
+                }
+                // Calculating retval count
+                comptime var retValCount = switch (@typeInfo(RetType.?)) {
+                    .Void => 0,
+                    .Struct => |StructInfo| StructInfo.fields.len,
+                    else => 1,
+                };
+                // Calling
+                if (lua.lua_pcallk(self.L, fields_info.len, retValCount, 0, 0, null) != lua.LUA_OK) {
+                    return error.lua_runtime_error;
+                }
+                // Getting return value(s)
+                if (retValCount > 0) {
+                    return LuaState.pop(RetType.?, self.L);
+                }
+            }
+        };
+    }
+
+    const LuaTable = struct {
+        const Self = @This();
+
+        L: *lua.lua_State,
+        allocator: *std.mem.Allocator,
+        ref: c_int = undefined,
+
+        // This 'Init' assumes, that the top element of the stack is a Lua table
+        pub fn init(_L: *lua.lua_State, _allocator: *std.mem.Allocator) Self {
+            const _ref = lua.luaL_ref(_L, lua.LUA_REGISTRYINDEX);
+            var res = Self{
+                .L = _L,
+                .allocator = _allocator,
+                .ref = _ref,
+            };
+            return res;
+        }
+
+        // Unregister this shit
+        pub fn destroy(self: *const Self) void {
+            lua.luaL_unref(self.L, lua.LUA_REGISTRYINDEX, self.ref);
+        }
+
+        pub fn reference(self: *const Self) Self {
+            _ = lua.lua_rawgeti(self.L, lua.LUA_REGISTRYINDEX, self.ref);
+            return LuaTable.init(self.L, self.allocator);
+        }
+
+        pub fn set(self: *const Self, key: anytype, value: anytype) void {
+            // Getting table reference
+            _ = lua.lua_rawgeti(self.L, lua.LUA_REGISTRYINDEX, self.ref);
+            // Push key, value
+            LuaState.push(self.L, key);
+            LuaState.push(self.L, value);
+            // Set
+            lua.lua_settable(self.L, -3);
+        }
+
+        pub fn get(self: *const Self, comptime T: type, key: anytype) !T {
+            // Getting table by reference
+            _ = lua.lua_rawgeti(self.L, lua.LUA_REGISTRYINDEX, self.ref);
+            // Push key
+            LuaState.push(self.L, key);
+            // Get
+            _ = lua.lua_gettable(self.L, -2);
+            return try LuaState.pop(T, self.L);
+        }
+
+        pub fn getResource(self: *const Self, comptime T: type, key: anytype) !T {
+            // Getting table reference
+            _ = lua.lua_rawgeti(self.L, lua.LUA_REGISTRYINDEX, self.ref);
+            // Push key
+            LuaState.push(self.L, key);
+            // Get
+            _ = lua.lua_gettable(self.L, -2);
+            return try LuaState.popResource(T, self.L, self.allocator);
+        }
+    };
+
+    fn Ref(comptime T: type) type {
+        return struct {
+            const Self = @This();
+
+            luaRef: c_int,
+            ptr: T,
+
+            fn init(_ref: c_int, _ptr: *T) Self {
+                return Self {
+                    .luaRef = _ref,
+                    .ptr = _ptr,
+                };
+            }
+        };
     }
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -425,7 +441,7 @@ const LuaState = struct {
                 }
                 comptime var idx = std.mem.indexOf(u8, @typeName(T), "Lua") orelse -1;
                 if (idx == 0) {
-                    @compileError("Only allocGet supports LuaFunction and LuaTable.");
+                    @compileError("Only allocGet supports LuaFunction and LuaTable. Your type '" ++ @typeName(T) ++ "' is not supported.");
                 }
 
                 var result: T = .{ 0, 0 };
@@ -464,7 +480,7 @@ const LuaState = struct {
                 else => @compileError("Only Slice is supported."),
             },
             .Struct => |_| {
-                comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "LuaFunction") orelse -1;
+                comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "LuaState.LuaFunction") orelse -1;
                 comptime var tblIdx = std.mem.indexOf(u8, @typeName(T), "LuaTable") orelse -1;
                 if (funIdx == 0) {
                     if (lua.lua_type(L, -1) == lua.LUA_TFUNCTION) {
@@ -508,7 +524,7 @@ const LuaState = struct {
             .Struct => |_| {
                 comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "LuaFunction") orelse -1;
                 comptime var tblIdx = std.mem.indexOf(u8, @typeName(T), "LuaTable") orelse -1;
-                if (funIdx == 0 or tblIdx == 0) {
+                if (funIdx >= 0 or tblIdx >= 0) {
                     if (deallocate) {
                         value.?.destroy();
                     }
@@ -666,27 +682,13 @@ const mucuka = struct {
     b: bool = true,
 };
 
-fn LuaRef(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        luaRef: c_int,
-        ptr: T,
-
-        fn init(_ref: c_int, _ptr: *T) Self {
-            return Self {
-                .luaRef = _ref,
-                .ptr = _ptr,
-            };
-        }
-    };
-}
-
 pub fn main() anyerror!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     var luaState = try LuaState.init(&gpa.allocator);
     defer luaState.destroy();
     luaState.openLibs();
+
+    //@compileLog("Name: '" ++ @typeName(LuaRef(TestCustomTypes)) ++ "'");
 }
 
 test "set/get scalar" {
@@ -823,19 +825,19 @@ test "simple Zig => Lua function call" {
 
     luaState.run(lua_command);
 
-    var fun1 = try luaState.getResource(LuaFunction(fn () void), "test_1");
+    var fun1 = try luaState.getResource(LuaState.LuaFunction(fn () void), "test_1");
     defer luaState.release(fun1);
 
-    var fun2 = try luaState.getResource(LuaFunction(fn (a: i32) void), "test_2");
+    var fun2 = try luaState.getResource(LuaState.LuaFunction(fn (a: i32) void), "test_2");
     defer luaState.release(fun2);
 
-    var fun3_1 = try luaState.getResource(LuaFunction(fn (a: i32) i32), "test_3");
+    var fun3_1 = try luaState.getResource(LuaState.LuaFunction(fn (a: i32) i32), "test_3");
     defer luaState.release(fun3_1);
 
-    var fun3_2 = try luaState.getResource(LuaFunction(fn (a: []const u8) []const u8), "test_3");
+    var fun3_2 = try luaState.getResource(LuaState.LuaFunction(fn (a: []const u8) []const u8), "test_3");
     defer luaState.release(fun3_2);
 
-    var fun4 = try luaState.getResource(LuaFunction(fn (a: i32, b: i32) i32), "test_4");
+    var fun4 = try luaState.getResource(LuaState.LuaFunction(fn (a: i32, b: i32) i32), "test_4");
     defer luaState.release(fun4);
 
     try fun1.call(.{});
@@ -936,10 +938,10 @@ test "simple Zig => Lua => Zig function call" {
     luaState.run("function luaTestFun4(a) return testFun4(a); end");
     luaState.run("function luaTestFun5(a,b) return testFun5(a,b); end");
 
-    var fun4 = try luaState.getResource(LuaFunction(fn (a: []const u8) []const u8), "luaTestFun4");
+    var fun4 = try luaState.getResource(LuaState.LuaFunction(fn (a: []const u8) []const u8), "luaTestFun4");
     defer luaState.release(fun4);
 
-    var fun5 = try luaState.getResource(LuaFunction(fn (a: i32, b: i32) i32), "luaTestFun5");
+    var fun5 = try luaState.getResource(LuaState.LuaFunction(fn (a: i32, b: i32) i32), "luaTestFun5");
     defer luaState.release(fun5);
 
     var res4 = try fun4.call(.{"macika"});
@@ -949,7 +951,7 @@ test "simple Zig => Lua => Zig function call" {
     try std.testing.expect(res5 == 41);
 }
 
-fn testLuaInnerFun(fun: LuaFunction(fn (a: i32) i32)) i32 {
+fn testLuaInnerFun(fun: LuaState.LuaFunction(fn (a: i32) i32)) i32 {
     var res = fun.call(.{42}) catch unreachable;
     return res;
 }
@@ -961,7 +963,7 @@ test "Lua function injection into Zig function" {
     luaState.openLibs();
     // Binding on Zig side
     luaState.run("function getInt(a) return a+1; end");
-    var luafun = try luaState.getResource(LuaFunction(fn (a: i32) i32), "getInt");
+    var luafun = try luaState.getResource(LuaState.LuaFunction(fn (a: i32) i32), "getInt");
     defer luaState.release(luafun);
 
     var result = testLuaInnerFun(luafun);
@@ -1036,7 +1038,7 @@ test "LuaTable allocless set/get tests" {
 
     originalTbl.set("owner", true);
 
-    var tbl = try luaState.getResource(LuaTable, "tbl");
+    var tbl = try luaState.getResource(LuaState.LuaTable, "tbl");
     defer luaState.release(tbl);
 
     const owner = try tbl.get(bool, "owner");
@@ -1124,10 +1126,10 @@ test "LuaTable inner table tests" {
 
     tbl.set("innerTable", inTbl0);
 
-    var retTbl = try luaState.getResource(LuaTable, "tbl");
+    var retTbl = try luaState.getResource(LuaState.LuaTable, "tbl");
     defer luaState.release(retTbl);
 
-    var retInnerTable = try retTbl.getResource(LuaTable, "innerTable");
+    var retInnerTable = try retTbl.getResource(LuaState.LuaTable, "innerTable");
     defer luaState.release(retInnerTable);
 
     var str = try retInnerTable.get([]const u8, 1);
@@ -1138,12 +1140,12 @@ test "LuaTable inner table tests" {
     try std.testing.expect(float == 3.1415);
     try std.testing.expect(int == 42);
 
-    var retInner2Table = try retInnerTable.getResource(LuaTable, "table");
+    var retInner2Table = try retInnerTable.getResource(LuaState.LuaTable, "table");
     defer luaState.release(retInner2Table);
 
     str = try retInner2Table.get([]const u8, "str");
     int = try retInner2Table.get(i32, "int32");
-    var func = try retInner2Table.getResource(LuaFunction(fn (a: i32) i32), "fn");
+    var func = try retInner2Table.getResource(LuaState.LuaFunction(fn (a: i32) i32), "fn");
     defer luaState.release(func);
     var funcRes = try func.call(.{42});
 
@@ -1153,7 +1155,7 @@ test "LuaTable inner table tests" {
 }
 
 var luaTableArgSum: i32 = 0;
-fn testLuaTableArg(t: LuaTable) i32 {
+fn testLuaTableArg(t: LuaState.LuaTable) i32 {
     var a = t.get(i32, "a") catch -1;
     var b = t.get(i32, "b") catch -1;
     luaTableArgSum = a + b;
@@ -1179,14 +1181,14 @@ test "Function with LuaTable argument" {
     luaState.set("sumFn", testLuaTableArg);
     luaState.run("function test() return sumFn({a=1, b=2}); end");
 
-    var luaFun = try luaState.getResource(LuaFunction(fn () i32), "test");
+    var luaFun = try luaState.getResource(LuaState.LuaFunction(fn () i32), "test");
     defer luaState.release(luaFun);
 
     var luaRes = try luaFun.call(.{});
     try std.testing.expect(luaRes == 1 + 2);
 }
 
-fn testLuaTableArgOut(t: LuaTable) LuaTable {
+fn testLuaTableArgOut(t: LuaState.LuaTable) LuaState.LuaTable {
     t.set(1, 42);
     t.set(2, 128);
     return t;
@@ -1214,7 +1216,7 @@ test "Function with LuaTable result" {
     //luaState.run("function test() tbl = tblFn({}); return tbl[1] + tbl[2]; end");
     luaState.run("function test() tbl = tblFn({}); return tbl[1] + tbl[2]; end");
 
-    var luaFun = try luaState.getResource(LuaFunction(fn () i32), "test");
+    var luaFun = try luaState.getResource(LuaState.LuaFunction(fn () i32), "test");
     defer luaState.release(luaFun);
 
     var luaRes = try luaFun.call(.{});
@@ -1291,22 +1293,22 @@ test "Register custom types I: allocless in/out member functions arguments" {
     ;
     luaState.run(cmd);
 
-    var getA = try luaState.getResource(LuaFunction(fn() i32), "getA");
+    var getA = try luaState.getResource(LuaState.LuaFunction(fn() i32), "getA");
     defer luaState.release(getA);
 
-    var getB = try luaState.getResource(LuaFunction(fn() f32), "getB");
+    var getB = try luaState.getResource(LuaState.LuaFunction(fn() f32), "getB");
     defer luaState.release(getB);
 
-    var getC = try luaState.getResource(LuaFunction(fn() [] const u8), "getC");
+    var getC = try luaState.getResource(LuaState.LuaFunction(fn() [] const u8), "getC");
     defer luaState.release(getC);
 
-    var getD = try luaState.getResource(LuaFunction(fn() bool), "getD");
+    var getD = try luaState.getResource(LuaState.LuaFunction(fn() bool), "getD");
     defer luaState.release(getD);
 
-    var reset = try luaState.getResource(LuaFunction(fn() void), "reset");
+    var reset = try luaState.getResource(LuaState.LuaFunction(fn() void), "reset");
     defer luaState.release(reset);
 
-    var store = try luaState.getResource(LuaFunction(fn(_a: i32, _b: f32, _c: []const u8, _d: bool) void), "store");
+    var store = try luaState.getResource(LuaState.LuaFunction(fn(_a: i32, _b: f32, _c: []const u8, _d: bool) void), "store");
     defer luaState.release(store);
 
     var resA0 = try getA.call(.{});
