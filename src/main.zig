@@ -87,9 +87,9 @@ const Lua = struct {
         }
     }
 
-    pub fn createTableResource(self: *Lua) !Lua.LuaTable {
+    pub fn createTableResource(self: *Lua) !Lua.Table {
         _ = lualib.lua_createtable(self.L, 0, 0);
-        return try popResource(Lua.LuaTable, self.L, self.allocator);
+        return try popResource(Lua.Table, self.L, self.allocator);
     }
 
     pub fn release(self: *Lua, v: anytype) void {
@@ -253,7 +253,7 @@ const Lua = struct {
         };
     }
 
-    const LuaTable = struct {
+    const Table = struct {
         const Self = @This();
 
         L: *lualib.lua_State,
@@ -278,7 +278,7 @@ const Lua = struct {
 
         pub fn reference(self: *const Self) Self {
             _ = lualib.lua_rawgeti(self.L, lualib.LUA_REGISTRYINDEX, self.ref);
-            return LuaTable.init(self.L, self.allocator);
+            return Table.init(self.L, self.allocator);
         }
 
         pub fn set(self: *const Self, key: anytype, value: anytype) void {
@@ -384,11 +384,11 @@ const Lua = struct {
                 Helper.pushFunctor(L, value) catch unreachable;
             },
             .Struct => |_| {
-                comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "LuaFunction") orelse -1;
-                comptime var tblIdx = std.mem.indexOf(u8, @typeName(T), "LuaTable") orelse -1;
-                if (funIdx == 0 or tblIdx == 0) {
+                comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "Function") orelse -1;
+                comptime var tblIdx = std.mem.indexOf(u8, @typeName(T), "Table") orelse -1;
+                if (funIdx >= 0 or tblIdx >= 0) {
                     _ = lualib.lua_rawgeti(L, lualib.LUA_REGISTRYINDEX, value.ref);
-                } else @compileError("Only LuaFunction ands LuaTable supported; '" ++ @typeName(T) ++ "' not.");
+                } else @compileError("Only LuaFunction ands Lua.Table supported; '" ++ @typeName(T) ++ "' not.");
             },
             // .Type => {
             // },
@@ -439,9 +439,10 @@ const Lua = struct {
                 if (StructInfo.is_tuple) {
                     @compileError("Tuples are not supported.");
                 }
-                comptime var idx = std.mem.indexOf(u8, @typeName(T), "Lua") orelse -1;
-                if (idx == 0) {
-                    @compileError("Only allocGet supports LuaFunction and LuaTable. Your type '" ++ @typeName(T) ++ "' is not supported.");
+                comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "Function") orelse -1;
+                comptime var tblIdx = std.mem.indexOf(u8, @typeName(T), "Table") orelse -1;
+                if (funIdx >= 0 or tblIdx >= 0) {
+                    @compileError("Only allocGet supports Lua.Function and Lua.Table. Your type '" ++ @typeName(T) ++ "' is not supported.");
                 }
 
                 var result: T = .{ 0, 0 };
@@ -480,16 +481,16 @@ const Lua = struct {
                 else => @compileError("Only Slice is supported."),
             },
             .Struct => |_| {
-                comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "Lua.Function") orelse -1;
-                comptime var tblIdx = std.mem.indexOf(u8, @typeName(T), "LuaTable") orelse -1;
-                if (funIdx == 0) {
+                comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "Function") orelse -1;
+                comptime var tblIdx = std.mem.indexOf(u8, @typeName(T), "Table") orelse -1;
+                if (funIdx >= 0) {
                     if (lualib.lua_type(L, -1) == lualib.LUA_TFUNCTION) {
                         return T.init(L, allocator);
                     } else {
                         defer lualib.lua_pop(L, 1);
                         return error.bad_type;
                     }
-                } else if (tblIdx == 0) {
+                } else if (tblIdx >= 0) {
                     if (lualib.lua_type(L, -1) == lualib.LUA_TTABLE) {
                         return T.init(L, allocator);
                     } else {
@@ -523,7 +524,7 @@ const Lua = struct {
             },
             .Struct => |_| {
                 comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "Function") orelse -1;
-                comptime var tblIdx = std.mem.indexOf(u8, @typeName(T), "LuaTable") orelse -1;
+                comptime var tblIdx = std.mem.indexOf(u8, @typeName(T), "Table") orelse -1;
                 if (funIdx >= 0 or tblIdx >= 0) {
                     if (deallocate) {
                         value.?.destroy();
@@ -1025,7 +1026,7 @@ test "Slice input to Zig function" {
     lua.run(lua_command);
 }
 
-test "LuaTable allocless set/get tests" {
+test "Lua.Table allocless set/get tests" {
     var lua = try Lua.init(std.testing.allocator);
     defer lua.destroy();
 
@@ -1038,7 +1039,7 @@ test "LuaTable allocless set/get tests" {
 
     originalTbl.set("owner", true);
 
-    var tbl = try lua.getResource(Lua.LuaTable, "tbl");
+    var tbl = try lua.getResource(Lua.Table, "tbl");
     defer lua.release(tbl);
 
     const owner = try tbl.get(bool, "owner");
@@ -1097,7 +1098,7 @@ fn tblFun(a: i32) i32 {
     return 3 * a;
 }
 
-test "LuaTable inner table tests" {
+test "Lua.Table inner table tests" {
     var lua = try Lua.init(std.testing.allocator);
     defer lua.destroy();
 
@@ -1126,10 +1127,10 @@ test "LuaTable inner table tests" {
 
     tbl.set("innerTable", inTbl0);
 
-    var retTbl = try lua.getResource(Lua.LuaTable, "tbl");
+    var retTbl = try lua.getResource(Lua.Table, "tbl");
     defer lua.release(retTbl);
 
-    var retInnerTable = try retTbl.getResource(Lua.LuaTable, "innerTable");
+    var retInnerTable = try retTbl.getResource(Lua.Table, "innerTable");
     defer lua.release(retInnerTable);
 
     var str = try retInnerTable.get([]const u8, 1);
@@ -1140,7 +1141,7 @@ test "LuaTable inner table tests" {
     try std.testing.expect(float == 3.1415);
     try std.testing.expect(int == 42);
 
-    var retInner2Table = try retInnerTable.getResource(Lua.LuaTable, "table");
+    var retInner2Table = try retInnerTable.getResource(Lua.Table, "table");
     defer lua.release(retInner2Table);
 
     str = try retInner2Table.get([]const u8, "str");
@@ -1155,14 +1156,14 @@ test "LuaTable inner table tests" {
 }
 
 var luaTableArgSum: i32 = 0;
-fn testLuaTableArg(t: Lua.LuaTable) i32 {
+fn testLuaTableArg(t: Lua.Table) i32 {
     var a = t.get(i32, "a") catch -1;
     var b = t.get(i32, "b") catch -1;
     luaTableArgSum = a + b;
     return luaTableArgSum;
 }
 
-test "Function with LuaTable argument" {
+test "Function with Lua.Table argument" {
     var lua = try Lua.init(std.testing.allocator);
     defer lua.destroy();
 
@@ -1188,13 +1189,13 @@ test "Function with LuaTable argument" {
     try std.testing.expect(luaRes == 1 + 2);
 }
 
-fn testLuaTableArgOut(t: Lua.LuaTable) Lua.LuaTable {
+fn testLuaTableArgOut(t: Lua.Table) Lua.Table {
     t.set(1, 42);
     t.set(2, 128);
     return t;
 }
 
-test "Function with LuaTable result" {
+test "Function with Lua.Table result" {
     var lua = try Lua.init(std.testing.allocator);
     defer lua.destroy();
 
