@@ -191,7 +191,7 @@ const Lua = struct {
         try registeredTypes.put(@typeName(T), metaTblName[0..]);
     }
 
-    fn LuaFunction(comptime T: type) type {
+    fn Function(comptime T: type) type {
         const FuncType = T;
         const RetType =
             switch (@typeInfo(FuncType)) {
@@ -480,7 +480,7 @@ const Lua = struct {
                 else => @compileError("Only Slice is supported."),
             },
             .Struct => |_| {
-                comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "Lua.LuaFunction") orelse -1;
+                comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "Lua.Function") orelse -1;
                 comptime var tblIdx = std.mem.indexOf(u8, @typeName(T), "LuaTable") orelse -1;
                 if (funIdx == 0) {
                     if (lualib.lua_type(L, -1) == lualib.LUA_TFUNCTION) {
@@ -522,7 +522,7 @@ const Lua = struct {
                 else => return false,
             },
             .Struct => |_| {
-                comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "LuaFunction") orelse -1;
+                comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "Function") orelse -1;
                 comptime var tblIdx = std.mem.indexOf(u8, @typeName(T), "LuaTable") orelse -1;
                 if (funIdx >= 0 or tblIdx >= 0) {
                     if (deallocate) {
@@ -825,19 +825,19 @@ test "simple Zig => Lua function call" {
 
     lua.run(lua_command);
 
-    var fun1 = try lua.getResource(Lua.LuaFunction(fn () void), "test_1");
+    var fun1 = try lua.getResource(Lua.Function(fn () void), "test_1");
     defer lua.release(fun1);
 
-    var fun2 = try lua.getResource(Lua.LuaFunction(fn (a: i32) void), "test_2");
+    var fun2 = try lua.getResource(Lua.Function(fn (a: i32) void), "test_2");
     defer lua.release(fun2);
 
-    var fun3_1 = try lua.getResource(Lua.LuaFunction(fn (a: i32) i32), "test_3");
+    var fun3_1 = try lua.getResource(Lua.Function(fn (a: i32) i32), "test_3");
     defer lua.release(fun3_1);
 
-    var fun3_2 = try lua.getResource(Lua.LuaFunction(fn (a: []const u8) []const u8), "test_3");
+    var fun3_2 = try lua.getResource(Lua.Function(fn (a: []const u8) []const u8), "test_3");
     defer lua.release(fun3_2);
 
-    var fun4 = try lua.getResource(Lua.LuaFunction(fn (a: i32, b: i32) i32), "test_4");
+    var fun4 = try lua.getResource(Lua.Function(fn (a: i32, b: i32) i32), "test_4");
     defer lua.release(fun4);
 
     try fun1.call(.{});
@@ -938,10 +938,10 @@ test "simple Zig => Lua => Zig function call" {
     lua.run("function luaTestFun4(a) return testFun4(a); end");
     lua.run("function luaTestFun5(a,b) return testFun5(a,b); end");
 
-    var fun4 = try lua.getResource(Lua.LuaFunction(fn (a: []const u8) []const u8), "luaTestFun4");
+    var fun4 = try lua.getResource(Lua.Function(fn (a: []const u8) []const u8), "luaTestFun4");
     defer lua.release(fun4);
 
-    var fun5 = try lua.getResource(Lua.LuaFunction(fn (a: i32, b: i32) i32), "luaTestFun5");
+    var fun5 = try lua.getResource(Lua.Function(fn (a: i32, b: i32) i32), "luaTestFun5");
     defer lua.release(fun5);
 
     var res4 = try fun4.call(.{"macika"});
@@ -951,7 +951,7 @@ test "simple Zig => Lua => Zig function call" {
     try std.testing.expect(res5 == 41);
 }
 
-fn testLuaInnerFun(fun: Lua.LuaFunction(fn (a: i32) i32)) i32 {
+fn testLuaInnerFun(fun: Lua.Function(fn (a: i32) i32)) i32 {
     var res = fun.call(.{42}) catch unreachable;
     return res;
 }
@@ -963,7 +963,7 @@ test "Lua function injection into Zig function" {
     lua.openLibs();
     // Binding on Zig side
     lua.run("function getInt(a) return a+1; end");
-    var luafun = try lua.getResource(Lua.LuaFunction(fn (a: i32) i32), "getInt");
+    var luafun = try lua.getResource(Lua.Function(fn (a: i32) i32), "getInt");
     defer lua.release(luafun);
 
     var result = testLuaInnerFun(luafun);
@@ -1145,7 +1145,7 @@ test "LuaTable inner table tests" {
 
     str = try retInner2Table.get([]const u8, "str");
     int = try retInner2Table.get(i32, "int32");
-    var func = try retInner2Table.getResource(Lua.LuaFunction(fn (a: i32) i32), "fn");
+    var func = try retInner2Table.getResource(Lua.Function(fn (a: i32) i32), "fn");
     defer lua.release(func);
     var funcRes = try func.call(.{42});
 
@@ -1181,7 +1181,7 @@ test "Function with LuaTable argument" {
     lua.set("sumFn", testLuaTableArg);
     lua.run("function test() return sumFn({a=1, b=2}); end");
 
-    var luaFun = try lua.getResource(Lua.LuaFunction(fn () i32), "test");
+    var luaFun = try lua.getResource(Lua.Function(fn () i32), "test");
     defer lua.release(luaFun);
 
     var luaRes = try luaFun.call(.{});
@@ -1216,7 +1216,7 @@ test "Function with LuaTable result" {
     //lua.run("function test() tbl = tblFn({}); return tbl[1] + tbl[2]; end");
     lua.run("function test() tbl = tblFn({}); return tbl[1] + tbl[2]; end");
 
-    var luaFun = try lua.getResource(Lua.LuaFunction(fn () i32), "test");
+    var luaFun = try lua.getResource(Lua.Function(fn () i32), "test");
     defer lua.release(luaFun);
 
     var luaRes = try luaFun.call(.{});
@@ -1293,22 +1293,22 @@ test "Register custom types I: allocless in/out member functions arguments" {
     ;
     lua.run(cmd);
 
-    var getA = try lua.getResource(Lua.LuaFunction(fn() i32), "getA");
+    var getA = try lua.getResource(Lua.Function(fn() i32), "getA");
     defer lua.release(getA);
 
-    var getB = try lua.getResource(Lua.LuaFunction(fn() f32), "getB");
+    var getB = try lua.getResource(Lua.Function(fn() f32), "getB");
     defer lua.release(getB);
 
-    var getC = try lua.getResource(Lua.LuaFunction(fn() [] const u8), "getC");
+    var getC = try lua.getResource(Lua.Function(fn() [] const u8), "getC");
     defer lua.release(getC);
 
-    var getD = try lua.getResource(Lua.LuaFunction(fn() bool), "getD");
+    var getD = try lua.getResource(Lua.Function(fn() bool), "getD");
     defer lua.release(getD);
 
-    var reset = try lua.getResource(Lua.LuaFunction(fn() void), "reset");
+    var reset = try lua.getResource(Lua.Function(fn() void), "reset");
     defer lua.release(reset);
 
-    var store = try lua.getResource(Lua.LuaFunction(fn(_a: i32, _b: f32, _c: []const u8, _d: bool) void), "store");
+    var store = try lua.getResource(Lua.Function(fn(_a: i32, _b: f32, _c: []const u8, _d: bool) void), "store");
     defer lua.release(store);
 
     var resA0 = try getA.call(.{});
