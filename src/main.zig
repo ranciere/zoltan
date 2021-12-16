@@ -9,7 +9,7 @@ pub const lualib = @cImport({
     @cInclude("lualib.h");
 });
 
-var registeredTypes: std.StringArrayHashMap([] const u8) = undefined;
+var registeredTypes: std.StringArrayHashMap([]const u8) = undefined;
 
 const Lua = struct {
     L: *lualib.lua_State,
@@ -25,11 +25,12 @@ const Lua = struct {
             .allocator = allocator,
             //.registeredTypes = std.StringArrayHashMap([] const u8).init(allocator),
         };
-        registeredTypes = std.StringArrayHashMap([] const u8).init(allocator);
+        registeredTypes = std.StringArrayHashMap([]const u8).init(allocator);
         return state;
     }
 
     pub fn destroy(self: *Lua) void {
+        registeredTypes.clearAndFree();
         _ = lualib.lua_close(self.L);
     }
 
@@ -87,15 +88,47 @@ const Lua = struct {
         }
     }
 
-    pub fn createTableResource(self: *Lua) !Lua.Table {
+    pub fn createTable(self: *Lua) !Lua.Table {
         _ = lualib.lua_createtable(self.L, 0, 0);
         return try popResource(Lua.Table, self.L, self.allocator);
+    }
+
+    pub fn createUserType(self: *Lua, comptime T: type, params: anytype) !Ref(T) {
+        var metaTableName: []const u8 = undefined;
+        // Allocate memory
+        var ptr = @ptrCast(*T, @alignCast(@alignOf(T), lualib.lua_newuserdata(self.L, @sizeOf(T))));
+        // set its metatable
+        if (registeredTypes.get(@typeName(T))) |name| {
+            metaTableName = name;
+        } else {
+            return error.unregistered_type;
+        }
+        _ = lualib.luaL_getmetatable(self.L, @ptrCast([*c]const u8, metaTableName[0..]));
+        _ = lualib.lua_setmetatable(self.L, -2);
+        // (3) init & copy wrapped object
+        // Call init
+        const ArgTypes = std.meta.ArgsTuple(@TypeOf(T.init));
+        var args: ArgTypes = undefined;
+        const fields_info = std.meta.fields(@TypeOf(params));
+        const len = args.len;
+        comptime var idx = 0;
+        inline while (idx < len) : (idx += 1) {
+            args[idx] = @field(params, fields_info[idx].name);
+        }
+        ptr.* = @call(.{}, T.init, args);
+        // (4) check and store the callback table
+        //_ = lua.luaL_checktype(L, 1, lua.LUA_TTABLE);
+        _ = lualib.lua_pushvalue(self.L, 1);
+        _ = lualib.lua_setuservalue(self.L, -2);
+        var res = try popResource(Ref(T), self.L, self.allocator);
+        res.ptr = ptr;
+        return res;
     }
 
     pub fn release(self: *Lua, v: anytype) void {
         _ = allocateDeallocateHelper(@TypeOf(v), true, self.allocator, v);
     }
-    
+
     pub fn newUserType(self: *Lua, comptime T: type) !void {
         comptime var hasInit: bool = false;
         comptime var hasDestroy: bool = false;
@@ -114,7 +147,7 @@ const Lua = struct {
                 // set its metatable
                 _ = lualib.luaL_getmetatable(L, @ptrCast([*c]const u8, metaTblName[0..]));
                 _ = lualib.lua_setmetatable(L, -2);
-                // (3) init & copy wrapped object 
+                // (3) init & copy wrapped object
                 caller.call(T.init) catch unreachable;
                 ptr.* = caller.result;
                 // (4) check and store the callback table
@@ -164,7 +197,6 @@ const Lua = struct {
                                 //std.log.info("\tBaszataska: {s}", .{@typeName(ArgsType.@"0")});
                                 Caller.pushFunctor(self.L, field) catch unreachable;
                                 lualib.lua_setfield(self.L, -2, @ptrCast([*c]const u8, decl.name));
-
                             }
                         },
                         else => {},
@@ -276,7 +308,7 @@ const Lua = struct {
             lualib.luaL_unref(self.L, lualib.LUA_REGISTRYINDEX, self.ref);
         }
 
-        pub fn reference(self: *const Self) Self {
+        pub fn clone(self: *const Self) Self {
             _ = lualib.lua_rawgeti(self.L, lualib.LUA_REGISTRYINDEX, self.ref);
             return Table.init(self.L, self.allocator);
         }
@@ -316,14 +348,30 @@ const Lua = struct {
         return struct {
             const Self = @This();
 
-            luaRef: c_int,
-            ptr: T,
+            L: *lualib.lua_State,
+            allocator: *std.mem.Allocator,
+            ref: c_int = undefined,
+            ptr: *T = undefined,
 
-            fn init(_ref: c_int, _ptr: *T) Self {
-                return Self {
-                    .luaRef = _ref,
-                    .ptr = _ptr,
+            pub fn init(_L: *lualib.lua_State, _allocator: *std.mem.Allocator) Self {
+                const _ref = lualib.luaL_ref(_L, lualib.LUA_REGISTRYINDEX);
+                var res = Self{
+                    .L = _L,
+                    .allocator = _allocator,
+                    .ref = _ref,
                 };
+                return res;
+            }
+
+            pub fn destroy(self: *const Self) void {
+                _ = lualib.luaL_unref(self.L, lualib.LUA_REGISTRYINDEX, self.ref);
+            }
+
+            pub fn clone(self: *const Self) Self {
+                _ = lualib.lua_rawgeti(self.L, lualib.LUA_REGISTRYINDEX, self.ref);
+                var result = Self.init(self.L, self.allocator);
+                result.ptr = self.ptr;
+                return result;
             }
         };
     }
@@ -358,21 +406,29 @@ const Lua = struct {
                     }
                 },
                 .One => {
-                    if (@TypeOf(PointerInfo.child) == @TypeOf([]u8)) {
-                        _ = lualib.lua_pushstring(L, @ptrCast([*c]const u8, value));
-                    } else {
-                        @compileError("invalid type: '" ++ @typeName(T) ++ "'");
+                    switch (@typeInfo(PointerInfo.child)) {
+                        .Array => |childInfo| {
+                            if (childInfo.child == u8) {
+                                _ = lualib.lua_pushstring(L, @ptrCast([*c]const u8, value));
+                            } else {
+                                @compileError("invalid type: '" ++ @typeName(T) ++ "'");
+                            }
+                        },
+                        .Struct => {
+                            std.log.info("Ide gyun az okossag.", .{});
+                        },
+                        else => @compileError("BAszomalassan"),
                     }
                 },
                 .Many => {
-                    if (@TypeOf(PointerInfo.child) == @TypeOf([]u8)) {
+                    if (PointerInfo.child == u8) {
                         _ = lualib.lua_pushstring(L, @ptrCast([*c]const u8, value));
                     } else {
-                        @compileError("invalid type: '" ++ @typeName(T) ++ "'");
+                        @compileError("invalid type: '" ++ @typeName(T) ++ "'. Typeinfo: '" ++ @typeInfo(PointerInfo.child) ++ "'");
                     }
                 },
                 .C => {
-                    if (@TypeOf(PointerInfo.child) == @TypeOf([]u8)) {
+                    if (PointerInfo.child == u8) {
                         _ = lualib.lua_pushstring(L, value);
                     } else {
                         @compileError("invalid type: '" ++ @typeName(T) ++ "'");
@@ -386,9 +442,10 @@ const Lua = struct {
             .Struct => |_| {
                 comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "Function") orelse -1;
                 comptime var tblIdx = std.mem.indexOf(u8, @typeName(T), "Table") orelse -1;
-                if (funIdx >= 0 or tblIdx >= 0) {
+                comptime var refIdx = std.mem.indexOf(u8, @typeName(T), "Ref(") orelse -1;
+                if (funIdx >= 0 or tblIdx >= 0 or refIdx >= 0) {
                     _ = lualib.lua_rawgeti(L, lualib.LUA_REGISTRYINDEX, value.ref);
-                } else @compileError("Only LuaFunction ands Lua.Table supported; '" ++ @typeName(T) ++ "' not.");
+                } else @compileError("Only Function ands Lua.Table supported; '" ++ @typeName(T) ++ "' not.");
             },
             // .Type => {
             // },
@@ -429,8 +486,8 @@ const Lua = struct {
                     if (optionalTbl) |tbl| {
                         var result = @ptrCast(T, @alignCast(@alignOf(PointerInfo.child), lualib.luaL_checkudata(L, -1, @ptrCast([*c]const u8, tbl[0..]))));
                         return result;
-                    } else { 
-                        return error.invalidType; 
+                    } else {
+                        return error.invalidType;
                     }
                 },
                 else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
@@ -483,6 +540,7 @@ const Lua = struct {
             .Struct => |_| {
                 comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "Function") orelse -1;
                 comptime var tblIdx = std.mem.indexOf(u8, @typeName(T), "Table") orelse -1;
+                comptime var refIdx = std.mem.indexOf(u8, @typeName(T), "Ref(") orelse -1;
                 if (funIdx >= 0) {
                     if (lualib.lua_type(L, -1) == lualib.LUA_TFUNCTION) {
                         return T.init(L, allocator);
@@ -497,7 +555,14 @@ const Lua = struct {
                         defer lualib.lua_pop(L, 1);
                         return error.bad_type;
                     }
-                } else @compileError("Only LuaFunction supported; '" ++ @typeName(T) ++ "' not.");
+                } else if (refIdx >= 0) {
+                    if (lualib.lua_type(L, -1) == lualib.LUA_TUSERDATA) {
+                        return T.init(L, allocator);
+                    } else {
+                        defer lualib.lua_pop(L, 1);
+                        return error.bad_type;
+                    }
+                } else @compileError("Only Function supported; '" ++ @typeName(T) ++ "' not.");
             },
             else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
         }
@@ -525,7 +590,8 @@ const Lua = struct {
             .Struct => |_| {
                 comptime var funIdx = std.mem.indexOf(u8, @typeName(T), "Function") orelse -1;
                 comptime var tblIdx = std.mem.indexOf(u8, @typeName(T), "Table") orelse -1;
-                if (funIdx >= 0 or tblIdx >= 0) {
+                comptime var refIdx = std.mem.indexOf(u8, @typeName(T), "Ref(") orelse -1;
+                if (funIdx >= 0 or tblIdx >= 0 or refIdx >= 0) {
                     if (deallocate) {
                         value.?.destroy();
                     }
@@ -666,7 +732,7 @@ const TestStruct = struct {
     }
 
     pub fn fun2(self: *TestStruct, a: i32, b: i32) i32 {
-        std.log.info("State: {}, Input: {}, {}", .{self.a, a, b});
+        std.log.info("State: {}, Input: {}, {}", .{ self.a, a, b });
         return a + b;
     }
 
@@ -684,12 +750,21 @@ const mucuka = struct {
 };
 
 pub fn main() anyerror!void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var lua = try Lua.init(&gpa.allocator);
+    var lua = try Lua.init(std.testing.allocator);
     defer lua.destroy();
     lua.openLibs();
 
-    //@compileLog("Name: '" ++ @typeName(LuaRef(TestCustomTypes)) ++ "'");
+    try lua.newUserType(TestStruct);
+    var r = try lua.createUserType(TestStruct, .{42});
+
+    lua.set("ojjektum", r);
+    lua.run("print(ojjektum, ojjektum.fun2); res = ojjektum:fun2(4,5); print(res)");
+
+    _ = r.ptr.fun2(1, 4);
+
+    defer lua.release(r);
+
+    //lua.run("print('ZigO: ', zigO)");
 }
 
 test "set/get scalar" {
@@ -1033,7 +1108,7 @@ test "Lua.Table allocless set/get tests" {
     lua.openLibs();
 
     // Create table
-    var originalTbl = try lua.createTableResource();
+    var originalTbl = try lua.createTable();
     defer originalTbl.destroy();
     lua.set("tbl", originalTbl);
 
@@ -1105,15 +1180,15 @@ test "Lua.Table inner table tests" {
     lua.openLibs();
 
     // Create table
-    var tbl = try lua.createTableResource();
+    var tbl = try lua.createTable();
     defer lua.release(tbl);
 
     lua.set("tbl", tbl);
 
-    var inTbl0 = try lua.createTableResource();
+    var inTbl0 = try lua.createTable();
     defer lua.release(inTbl0);
 
-    var inTbl1 = try lua.createTableResource();
+    var inTbl1 = try lua.createTable();
     defer lua.release(inTbl1);
 
     inTbl1.set("str", "string");
@@ -1169,7 +1244,7 @@ test "Function with Lua.Table argument" {
 
     lua.openLibs();
     // Zig side
-    var tbl = try lua.createTableResource();
+    var tbl = try lua.createTable();
     defer lua.release(tbl);
 
     tbl.set("a", 42);
@@ -1202,7 +1277,7 @@ test "Function with Lua.Table result" {
     lua.openLibs();
     lua.injectPrettyPrint();
     // Zig side
-    var tbl = try lua.createTableResource();
+    var tbl = try lua.createTable();
     defer lua.release(tbl);
 
     var zigRes = testLuaTableArgOut(tbl);
@@ -1224,15 +1299,14 @@ test "Function with Lua.Table result" {
     try std.testing.expect(luaRes == 42 + 128);
 }
 
-
-const TestCustomTypes = struct {
+const TestCustomType = struct {
     a: i32,
     b: f32,
     c: []const u8,
     d: bool,
 
-    pub fn init(_a: i32, _b: f32, _c: []const u8, _d: bool) TestCustomTypes {
-        return TestCustomTypes {
+    pub fn init(_a: i32, _b: f32, _c: []const u8, _d: bool) TestCustomType {
+        return TestCustomType{
             .a = _a,
             .b = _b,
             .c = _c,
@@ -1240,34 +1314,32 @@ const TestCustomTypes = struct {
         };
     }
 
-    pub fn destroy(_: *TestCustomTypes) void {
+    pub fn destroy(_: *TestCustomType) void {}
 
-    }
-
-    pub fn getA(self: *TestCustomTypes) i32 { 
+    pub fn getA(self: *TestCustomType) i32 {
         return self.a;
     }
 
-    pub fn getB(self: *TestCustomTypes) f32 { 
+    pub fn getB(self: *TestCustomType) f32 {
         return self.b;
     }
 
-    pub fn getC(self: *TestCustomTypes) []const u8 { 
+    pub fn getC(self: *TestCustomType) []const u8 {
         return self.c;
     }
 
-    pub fn getD(self: *TestCustomTypes) bool { 
+    pub fn getD(self: *TestCustomType) bool {
         return self.d;
     }
 
-    pub fn reset(self: *TestCustomTypes) void {
+    pub fn reset(self: *TestCustomType) void {
         self.a = 0;
         self.b = 0;
         self.c = "";
         self.d = false;
     }
-    
-    pub fn store(self: *TestCustomTypes, _a: i32, _b: f32, _c: []const u8, _d: bool) void {
+
+    pub fn store(self: *TestCustomType, _a: i32, _b: f32, _c: []const u8, _d: bool) void {
         self.a = _a;
         self.b = _b;
         self.c = _c;
@@ -1275,16 +1347,15 @@ const TestCustomTypes = struct {
     }
 };
 
-test "Register custom types I: allocless in/out member functions arguments" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var lua = try Lua.init(&gpa.allocator);
+test "Custom types I: allocless in/out member functions arguments" {
+    var lua = try Lua.init(std.testing.allocator);
     defer lua.destroy();
     lua.openLibs();
 
-    _ = try lua.newUserType(TestCustomTypes);
+    try lua.newUserType(TestCustomType);
 
-    const cmd = 
-        \\o = TestCustomTypes.new(42, 42.0, "life", true)
+    const cmd =
+        \\o = TestCustomType.new(42, 42.0, "life", true)
         \\function getA() return o:getA(); end
         \\function getB() return o:getB(); end
         \\function getC() return o:getC(); end
@@ -1294,22 +1365,22 @@ test "Register custom types I: allocless in/out member functions arguments" {
     ;
     lua.run(cmd);
 
-    var getA = try lua.getResource(Lua.Function(fn() i32), "getA");
+    var getA = try lua.getResource(Lua.Function(fn () i32), "getA");
     defer lua.release(getA);
 
-    var getB = try lua.getResource(Lua.Function(fn() f32), "getB");
+    var getB = try lua.getResource(Lua.Function(fn () f32), "getB");
     defer lua.release(getB);
 
-    var getC = try lua.getResource(Lua.Function(fn() [] const u8), "getC");
+    var getC = try lua.getResource(Lua.Function(fn () []const u8), "getC");
     defer lua.release(getC);
 
-    var getD = try lua.getResource(Lua.Function(fn() bool), "getD");
+    var getD = try lua.getResource(Lua.Function(fn () bool), "getD");
     defer lua.release(getD);
 
-    var reset = try lua.getResource(Lua.Function(fn() void), "reset");
+    var reset = try lua.getResource(Lua.Function(fn () void), "reset");
     defer lua.release(reset);
 
-    var store = try lua.getResource(Lua.Function(fn(_a: i32, _b: f32, _c: []const u8, _d: bool) void), "store");
+    var store = try lua.getResource(Lua.Function(fn (_a: i32, _b: f32, _c: []const u8, _d: bool) void), "store");
     defer lua.release(store);
 
     var resA0 = try getA.call(.{});
@@ -1324,7 +1395,7 @@ test "Register custom types I: allocless in/out member functions arguments" {
     var resD0 = try getD.call(.{});
     try std.testing.expect(resD0 == true);
 
-    try store.call(.{1, 1.0, "death", false});
+    try store.call(.{ 1, 1.0, "death", false });
 
     var resA1 = try getA.call(.{});
     try std.testing.expect(resA1 == 1);
@@ -1353,17 +1424,35 @@ test "Register custom types I: allocless in/out member functions arguments" {
     try std.testing.expect(resD2 == false);
 }
 
-test "Registered user type as global without ownership" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var lua = try Lua.init(&gpa.allocator);
+test "Custom types II: set as global, get without ownership" {
+    var lua = try Lua.init(std.testing.allocator);
     defer lua.destroy();
     lua.openLibs();
 
-    _ = try lua.newUserType(TestCustomTypes);
+    _ = try lua.newUserType(TestCustomType);
+    // Creation from Zig
+    var ojjectum = try lua.createUserType(TestCustomType, .{42, 42.0, "life", true});
+    defer lua.release(ojjectum);
 
-    lua.run("o = TestCustomTypes.new(42, 42.0, 'life', true)");
+    lua.set("zig", ojjectum);
+    var ptrZig = try lua.get(*TestCustomType, "zig");
 
-    var ptr = try lua.get(*TestCustomTypes, "o");
+    try std.testing.expect(ptrZig.a == 42);
+    try std.testing.expect(ptrZig.b == 42.0);
+    try std.testing.expect(std.mem.eql(u8, ptrZig.c, "life"));
+    try std.testing.expect(ptrZig.d == true);
+
+    ptrZig.reset();
+
+    try std.testing.expect(ptrZig.a == 0);
+    try std.testing.expect(ptrZig.b == 0.0);
+    try std.testing.expect(std.mem.eql(u8, ptrZig.c, ""));
+    try std.testing.expect(ptrZig.d == false);
+
+    // Creation From Lua
+    lua.run("o = TestCustomType.new(42, 42.0, 'life', true)");
+
+    var ptr = try lua.get(*TestCustomType, "o");
 
     try std.testing.expect(ptr.a == 42);
     try std.testing.expect(ptr.b == 42.0);
@@ -1378,32 +1467,31 @@ test "Registered user type as global without ownership" {
     try std.testing.expect(ptr.d == false);
 }
 
-fn testCustomTypeSwap(ptr0: *TestCustomTypes, ptr1: *TestCustomTypes) void {
-    var tmp: TestCustomTypes = undefined;
+fn testCustomTypeSwap(ptr0: *TestCustomType, ptr1: *TestCustomType) void {
+    var tmp: TestCustomType = undefined;
     tmp = ptr0.*;
     ptr0.* = ptr1.*;
     ptr1.* = tmp;
 }
 
-test "Zig function with registered user type arguments" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var lua = try Lua.init(&gpa.allocator);
+test "Custom types III: Zig function with custom user type arguments" {
+    var lua = try Lua.init(std.testing.allocator);
     defer lua.destroy();
     lua.openLibs();
 
-    _ = try lua.newUserType(TestCustomTypes);
+    _ = try lua.newUserType(TestCustomType);
     lua.set("swap", testCustomTypeSwap);
 
-    const cmd = 
-        \\o0 = TestCustomTypes.new(42, 42.0, 'life', true)
-        \\o1 = TestCustomTypes.new(0, 1.0, 'test', false)
+    const cmd =
+        \\o0 = TestCustomType.new(42, 42.0, 'life', true)
+        \\o1 = TestCustomType.new(0, 1.0, 'test', false)
         \\swap(o0, o1)
     ;
 
     lua.run(cmd);
 
-    var ptr0 = try lua.get(*TestCustomTypes, "o0");
-    var ptr1 = try lua.get(*TestCustomTypes, "o1");
+    var ptr0 = try lua.get(*TestCustomType, "o0");
+    var ptr1 = try lua.get(*TestCustomType, "o1");
 
     try std.testing.expect(ptr0.a == 0);
     try std.testing.expect(ptr0.b == 1.0);
