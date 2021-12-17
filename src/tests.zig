@@ -1,5 +1,5 @@
 const std = @import("std");
-const Lua = @import("main.zig").Lua;
+const Lua = @import("lua.zig").Lua;
 const assert = std.debug.assert;
 
 test "set/get scalar" {
