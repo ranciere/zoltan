@@ -12,16 +12,7 @@ pub fn build(b: *std.build.Builder) void {
     const mode = b.standardReleaseOptions();
 
     const exe = b.addExecutable("zoltan", "src/main.zig");
-    // Lua headers + required source files
-    exe.addIncludeDir("src/lua-5.4.3/src");
-
-    const flags = [_][]const u8{
-        "-std=c99",
-        "-O2",
-    };
-    exe.addCSourceFiles(&lua_files, &flags);
-    exe.linkLibC();
-    
+    addLuaLibrary(exe, "");
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.install();
@@ -35,12 +26,9 @@ pub fn build(b: *std.build.Builder) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const exe_tests = b.addTest("src/main.zig");
+    const exe_tests = b.addTest("src/tests.zig");
     // Lua 
-    exe_tests.addIncludeDir("src/lua-5.4.3/src");
-    exe_tests.addCSourceFiles(&lua_files, &flags);
-    
-    exe_tests.linkLibC();
+    addLuaLibrary(exe_tests, "" );
 
     //
     exe_tests.setBuildMode(mode);
@@ -49,7 +37,25 @@ pub fn build(b: *std.build.Builder) void {
     test_step.dependOn(&exe_tests.step);
 }
 
-const lua_files = [_] []const u8{
+pub fn addLuaLibrary(exe: *std.build.LibExeObjStep, installPath: [] const u8) void {
+    var buf: [1024]u8 = undefined;
+    // Lua headers + required source files
+    var path = std.fmt.bufPrint(buf[0..], "{s}{s}", .{ installPath, "src/lua-5.4.3/src"}) catch unreachable;
+
+    exe.addIncludeDir(path);
+    // C compile flags
+    const flags = [_][]const u8{
+        "-std=c99",
+        "-O2",
+    };
+    for (luaFiles) |luaFile| {
+        var cPath = std.fmt.bufPrint(buf[0..], "{s}{s}", .{ installPath, luaFile}) catch unreachable;
+        exe.addCSourceFile(cPath, &flags);
+    }
+    exe.linkLibC();
+}
+
+const luaFiles = [_] []const u8{
     "src/lua-5.4.3/src/lapi.c",
     "src/lua-5.4.3/src/lauxlib.c",
     "src/lua-5.4.3/src/lbaselib.c",

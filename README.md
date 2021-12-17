@@ -200,6 +200,7 @@ std.testing.expect(ptr.getA() == 42);
 ```
 
 ## TODO
+- Option for building without libc (if possible)
 - The current error handling is a little bit rustic, sometimes rough :) A proper error handling strategy would be better.
 - The `Lua.Table` should support JSON and deep-copy between Lua table and user structs.
 - Lua Coroutine support
