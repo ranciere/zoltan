@@ -1,8 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-var luaAllocator: *std.mem.Allocator = undefined;
-
 pub const lualib = @cImport({
     @cInclude("lua.h");
     @cInclude("lauxlib.h");
@@ -12,17 +10,23 @@ pub const lualib = @cImport({
 var registeredTypes: std.StringArrayHashMap([]const u8) = undefined;
 
 pub const Lua = struct {
+    const LuaUserData = struct {
+        allocator: std.mem.Allocator,
+    };
+    
     L: *lualib.lua_State,
-    allocator: *std.mem.Allocator,
+    ud: *LuaUserData,
     //registeredTypes: std.ArrayList(std.builtin.TypeInfo),
     //
 
-    pub fn init(allocator: *std.mem.Allocator) !Lua {
-        var _state = lualib.lua_newstate(alloc, allocator) orelse return error.OutOfMemory;
-        luaAllocator = allocator;
+    pub fn init(allocator: std.mem.Allocator) !Lua {
+        var _ud = try allocator.create(LuaUserData);
+        _ud.allocator = allocator;
+        
+        var _state = lualib.lua_newstate(alloc, _ud) orelse return error.OutOfMemory;
         var state = Lua{
             .L = _state,
-            .allocator = allocator,
+            .ud = _ud,
             //.registeredTypes = std.StringArrayHashMap([] const u8).init(allocator),
         };
         registeredTypes = std.StringArrayHashMap([]const u8).init(allocator);
@@ -32,6 +36,8 @@ pub const Lua = struct {
     pub fn destroy(self: *Lua) void {
         registeredTypes.clearAndFree();
         _ = lualib.lua_close(self.L);
+        var allocator = self.ud.allocator;
+        allocator.destroy(self.ud);
     }
 
     pub fn openLibs(self: *Lua) void {
@@ -82,7 +88,7 @@ pub const Lua = struct {
     pub fn getResource(self: *Lua, comptime T: type, name: []const u8) !T {
         const typ = lualib.lua_getglobal(self.L, @ptrCast([*c]const u8, name));
         if (typ != lualib.LUA_TNIL) {
-            return try popResource(T, self.L, self.allocator);
+            return try popResource(T, self.L);
         } else {
             return error.novalue;
         }
@@ -90,7 +96,7 @@ pub const Lua = struct {
 
     pub fn createTable(self: *Lua) !Lua.Table {
         _ = lualib.lua_createtable(self.L, 0, 0);
-        return try popResource(Lua.Table, self.L, self.allocator);
+        return try popResource(Lua.Table, self.L);
     }
 
     pub fn createUserType(self: *Lua, comptime T: type, params: anytype) !Ref(T) {
@@ -120,13 +126,13 @@ pub const Lua = struct {
         //_ = lua.luaL_checktype(L, 1, lua.LUA_TTABLE);
         _ = lualib.lua_pushvalue(self.L, 1);
         _ = lualib.lua_setuservalue(self.L, -2);
-        var res = try popResource(Ref(T), self.L, self.allocator);
+        var res = try popResource(Ref(T), self.L);
         res.ptr = ptr;
         return res;
     }
 
     pub fn release(self: *Lua, v: anytype) void {
-        _ = allocateDeallocateHelper(@TypeOf(v), true, self.allocator, v);
+        _ = allocateDeallocateHelper(@TypeOf(v), true, self.ud.allocator, v);
     }
 
     pub fn newUserType(self: *Lua, comptime T: type) !void {
@@ -225,16 +231,14 @@ pub const Lua = struct {
             const Self = @This();
 
             L: *lualib.lua_State,
-            allocator: *std.mem.Allocator,
             ref: c_int = undefined,
             func: FuncType = undefined,
 
             // This 'Init' assumes, that the top element of the stack is a Lua function
-            pub fn init(_L: *lualib.lua_State, _allocator: *std.mem.Allocator) Self {
+            pub fn init(_L: *lualib.lua_State) Self {
                 const _ref = lualib.luaL_ref(_L, lualib.LUA_REGISTRYINDEX);
                 var res = Self{
                     .L = _L,
-                    .allocator = _allocator,
                     .ref = _ref,
                 };
                 return res;
@@ -279,15 +283,13 @@ pub const Lua = struct {
         const Self = @This();
 
         L: *lualib.lua_State,
-        allocator: *std.mem.Allocator,
         ref: c_int = undefined,
 
         // This 'Init' assumes, that the top element of the stack is a Lua table
-        pub fn init(_L: *lualib.lua_State, _allocator: *std.mem.Allocator) Self {
+        pub fn init(_L: *lualib.lua_State) Self {
             const _ref = lualib.luaL_ref(_L, lualib.LUA_REGISTRYINDEX);
             var res = Self{
                 .L = _L,
-                .allocator = _allocator,
                 .ref = _ref,
             };
             return res;
@@ -330,7 +332,7 @@ pub const Lua = struct {
             Lua.push(self.L, key);
             // Get
             _ = lualib.lua_gettable(self.L, -2);
-            return try Lua.popResource(T, self.L, self.allocator);
+            return try Lua.popResource(T, self.L);
         }
     };
 
@@ -339,15 +341,13 @@ pub const Lua = struct {
             const Self = @This();
 
             L: *lualib.lua_State,
-            allocator: *std.mem.Allocator,
             ref: c_int = undefined,
             ptr: *T = undefined,
 
-            pub fn init(_L: *lualib.lua_State, _allocator: *std.mem.Allocator) Self {
+            pub fn init(_L: *lualib.lua_State) Self {
                 const _ref = lualib.luaL_ref(_L, lualib.LUA_REGISTRYINDEX);
                 var res = Self{
                     .L = _L,
-                    .allocator = _allocator,
                     .ref = _ref,
                 };
                 return res;
@@ -359,7 +359,7 @@ pub const Lua = struct {
 
             pub fn clone(self: *const Self) Self {
                 _ = lualib.lua_rawgeti(self.L, lualib.LUA_REGISTRYINDEX, self.ref);
-                var result = Self.init(self.L, self.allocator);
+                var result = Self.init(self.L);
                 result.ptr = self.ptr;
                 return result;
             }
@@ -503,7 +503,7 @@ pub const Lua = struct {
         }
     }
 
-    fn popResource(comptime T: type, L: *lualib.lua_State, allocator: *std.mem.Allocator) !T {
+    fn popResource(comptime T: type, L: *lualib.lua_State) !T {
         switch (@typeInfo(T)) {
             .Pointer => |PointerInfo| switch (PointerInfo.size) {
                 .Slice => {
@@ -511,7 +511,7 @@ pub const Lua = struct {
                     if (lualib.lua_type(L, -1) == lualib.LUA_TTABLE) {
                         lualib.lua_len(L, -1);
                         const len = try pop(u64, L);
-                        var res = try allocator.alloc(PointerInfo.child, @intCast(usize, len));
+                        var res = try getAllocator(L).alloc(PointerInfo.child, @intCast(usize, len));
                         var i: u32 = 0;
                         while (i < len) : (i += 1) {
                             push(L, i + 1);
@@ -531,21 +531,21 @@ pub const Lua = struct {
                 comptime var refIdx = std.mem.indexOf(u8, @typeName(T), "Ref(") orelse -1;
                 if (funIdx >= 0) {
                     if (lualib.lua_type(L, -1) == lualib.LUA_TFUNCTION) {
-                        return T.init(L, allocator);
+                        return T.init(L);
                     } else {
                         defer lualib.lua_pop(L, 1);
                         return error.bad_type;
                     }
                 } else if (tblIdx >= 0) {
                     if (lualib.lua_type(L, -1) == lualib.LUA_TTABLE) {
-                        return T.init(L, allocator);
+                        return T.init(L);
                     } else {
                         defer lualib.lua_pop(L, 1);
                         return error.bad_type;
                     }
                 } else if (refIdx >= 0) {
                     if (lualib.lua_type(L, -1) == lualib.LUA_TUSERDATA) {
-                        return T.init(L, allocator);
+                        return T.init(L);
                     } else {
                         defer lualib.lua_pop(L, 1);
                         return error.bad_type;
@@ -560,7 +560,7 @@ pub const Lua = struct {
     // 1. When it's called with only a type (allocator and value are both null) in compile time it returns that
     //    the given type is allocated or not
     // 2. When it's called with full arguments it cleans up.
-    fn allocateDeallocateHelper(comptime T: type, comptime deallocate: bool, allocator: ?*std.mem.Allocator, value: ?T) bool {
+    fn allocateDeallocateHelper(comptime T: type, comptime deallocate: bool, allocator: ?std.mem.Allocator, value: ?T) bool {
         switch (@typeInfo(T)) {
             .Pointer => |PointerInfo| switch (PointerInfo.size) {
                 .Slice => {
@@ -618,7 +618,7 @@ pub const Lua = struct {
                     comptime var i = self.args.len - 1;
                     inline while (i > -1) : (i -= 1) {
                         if (comptime allocateDeallocateHelper(@TypeOf(self.args[i]), false, null, null)) {
-                            self.args[i] = popResource(@TypeOf(self.args[i]), L.?, luaAllocator) catch unreachable;
+                            self.args[i] = popResource(@TypeOf(self.args[i]), L.?) catch unreachable;
                         } else {
                             self.args[i] = pop(@TypeOf(self.args[i]), L.?) catch unreachable;
                         }
@@ -635,12 +635,12 @@ pub const Lua = struct {
                     }
                 }
 
-                fn destroyArgs(self: *Self) !void {
+                fn destroyArgs(self: *Self, L: ?*lualib.lua_State) !void {
                     comptime var i = self.args.len - 1;
                     inline while (i > -1) : (i -= 1) {
-                        _ = allocateDeallocateHelper(@TypeOf(self.args[i]), true, luaAllocator, self.args[i]);
+                        _ = allocateDeallocateHelper(@TypeOf(self.args[i]), true, getAllocator(L), self.args[i]);
                     }
-                    _ = allocateDeallocateHelper(ReturnType, true, luaAllocator, self.result);
+                    _ = allocateDeallocateHelper(ReturnType, true, getAllocator(L), self.result);
                 }
             };
 
@@ -659,7 +659,7 @@ pub const Lua = struct {
                         // The end
                         f.pushResult(_L) catch unreachable;
                         // Release arguments
-                        f.destroyArgs() catch unreachable;
+                        f.destroyArgs(_L) catch unreachable;
                         return resultCnt;
                     }
                 }.helper;
@@ -668,23 +668,30 @@ pub const Lua = struct {
         };
     }
 
+    fn getAllocator(L: ?*lualib.lua_State) std.mem.Allocator {
+        var ud : *anyopaque = undefined;
+        _ = lualib.lua_getallocf (L, @ptrCast([*c]?*anyopaque, &ud));
+        const userData = @ptrCast(*Lua.LuaUserData, @alignCast(@alignOf(Lua.LuaUserData), ud));
+        return userData.allocator;
+    }
+
     // Credit: https://github.com/daurnimator/zig-autolua
-    fn alloc(ud: ?*c_void, ptr: ?*c_void, osize: usize, nsize: usize) callconv(.C) ?*c_void {
+    fn alloc(ud: ?*anyopaque, ptr: ?*anyopaque, osize: usize, nsize: usize) callconv(.C) ?*anyopaque {
         const c_alignment = 16;
-        const allocator = @ptrCast(*std.mem.Allocator, @alignCast(@alignOf(std.mem.Allocator), ud));
+        const userData = @ptrCast(*Lua.LuaUserData, @alignCast(@alignOf(Lua.LuaUserData), ud));
         if (@ptrCast(?[*]align(c_alignment) u8, @alignCast(c_alignment, ptr))) |previous_pointer| {
             const previous_slice = previous_pointer[0..osize];
             if (osize >= nsize) {
                 // Lua assumes that the allocator never fails when osize >= nsize.
-                return allocator.alignedShrink(previous_slice, c_alignment, nsize).ptr;
+                return userData.allocator.alignedShrink(previous_slice, c_alignment, nsize).ptr;
             } else {
-                return (allocator.reallocAdvanced(previous_slice, c_alignment, nsize, .exact) catch return null).ptr;
+                return (userData.allocator.reallocAdvanced(previous_slice, c_alignment, nsize, .exact) catch return null).ptr;
             }
         } else {
             // osize is any of LUA_TSTRING, LUA_TTABLE, LUA_TFUNCTION, LUA_TUSERDATA, or LUA_TTHREAD
             // when (and only when) Lua is creating a new object of that type.
             // When osize is some other value, Lua is allocating memory for something else.
-            return (allocator.alignedAlloc(u8, c_alignment, nsize) catch return null).ptr;
+            return (userData.allocator.alignedAlloc(u8, c_alignment, nsize) catch return null).ptr;
         }
     }
 };
