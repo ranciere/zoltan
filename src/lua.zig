@@ -7,35 +7,41 @@ pub const lualib = @cImport({
     @cInclude("lualib.h");
 });
 
-var registeredTypes: std.StringArrayHashMap([]const u8) = undefined;
-
 pub const Lua = struct {
     const LuaUserData = struct {
         allocator: std.mem.Allocator,
+        registeredTypes: std.StringArrayHashMap([]const u8) = undefined,
+
+        fn init(_allocator: std.mem.Allocator) LuaUserData {
+            return LuaUserData {
+                .allocator = _allocator,
+                .registeredTypes = std.StringArrayHashMap([]const u8).init(_allocator)
+            };
+        }
+
+        fn destroy(self: *LuaUserData) void {
+            self.registeredTypes.clearAndFree();
+        }
     };
     
     L: *lualib.lua_State,
     ud: *LuaUserData,
-    //registeredTypes: std.ArrayList(std.builtin.TypeInfo),
-    //
 
     pub fn init(allocator: std.mem.Allocator) !Lua {
         var _ud = try allocator.create(LuaUserData);
-        _ud.allocator = allocator;
+        _ud.* = LuaUserData.init(allocator);
         
         var _state = lualib.lua_newstate(alloc, _ud) orelse return error.OutOfMemory;
         var state = Lua{
             .L = _state,
             .ud = _ud,
-            //.registeredTypes = std.StringArrayHashMap([] const u8).init(allocator),
         };
-        registeredTypes = std.StringArrayHashMap([]const u8).init(allocator);
         return state;
     }
 
     pub fn destroy(self: *Lua) void {
-        registeredTypes.clearAndFree();
         _ = lualib.lua_close(self.L);
+        self.ud.destroy();
         var allocator = self.ud.allocator;
         allocator.destroy(self.ud);
     }
@@ -104,7 +110,7 @@ pub const Lua = struct {
         // Allocate memory
         var ptr = @ptrCast(*T, @alignCast(@alignOf(T), lualib.lua_newuserdata(self.L, @sizeOf(T))));
         // set its metatable
-        if (registeredTypes.get(@typeName(T))) |name| {
+        if (getUserData(self.L).registeredTypes.get(@typeName(T))) |name| {
             metaTableName = name;
         } else {
             return error.unregistered_type;
@@ -217,7 +223,7 @@ pub const Lua = struct {
         _ = lualib.lua_setglobal(self.L, @ptrCast([*c]const u8, metaTblName[0..]));
 
         // Store in the registry
-        try registeredTypes.put(@typeName(T), metaTblName[0..]);
+        try getUserData(self.L).registeredTypes.put(@typeName(T), metaTblName[0..]);
     }
 
     pub fn Function(comptime T: type) type {
@@ -472,7 +478,7 @@ pub const Lua = struct {
                     } else @compileError("Only '[]const u8' (aka string) is supported allocless.");
                 },
                 .One => {
-                    var optionalTbl = registeredTypes.get(@typeName(PointerInfo.child));
+                    var optionalTbl = getUserData(L).registeredTypes.get(@typeName(PointerInfo.child));
                     if (optionalTbl) |tbl| {
                         var result = @ptrCast(T, @alignCast(@alignOf(PointerInfo.child), lualib.luaL_checkudata(L, -1, @ptrCast([*c]const u8, tbl[0..]))));
                         return result;
@@ -668,11 +674,15 @@ pub const Lua = struct {
         };
     }
 
-    fn getAllocator(L: ?*lualib.lua_State) std.mem.Allocator {
+    fn getUserData(L: ?*lualib.lua_State) *Lua.LuaUserData {
         var ud : *anyopaque = undefined;
         _ = lualib.lua_getallocf (L, @ptrCast([*c]?*anyopaque, &ud));
         const userData = @ptrCast(*Lua.LuaUserData, @alignCast(@alignOf(Lua.LuaUserData), ud));
-        return userData.allocator;
+        return userData;
+    }
+
+    fn getAllocator(L: ?*lualib.lua_State) std.mem.Allocator {
+        return getUserData(L).allocator;
     }
 
     // Credit: https://github.com/daurnimator/zig-autolua
