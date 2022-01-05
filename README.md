@@ -1,6 +1,6 @@
 # zoltan
 
-A Sol inspired minimalistic Lua binding for Zig.
+A Sol-inspired minimalist Lua binding for Zig.
 
 ## Features
 
@@ -44,14 +44,19 @@ pub fn build(b: *std.build.Builder) void {
   addLuaLib(lua_tests, "third_party/zoltan/");
   lua_tests.setBuildMode(mode);
 ```
+You can found an example integration [here](https://github.com/ranciere/zoltan_example_app).
 
 ### Instantiating and destroying Lua engine
 
 ```zig
-var lua = try lua.init(std.testing.allocator);
-defer lua.destroy();
+const Lua = @import("lua").Lua;
+...
+pub fn main() anyerror!void {
+  ...
+  var lua = try Lua.init(std.testing.allocator);
+  defer lua.destroy();
 
-lua.openLibs();  // Open common standard libraries
+  lua.openLibs();  // Open common standard libraries
 ```
 
 ### Running Lua code
@@ -265,6 +270,7 @@ std.testing.expect(ptr.getA() == 42);
 
 - Option for building without libc (if possible)
 - Run Lua code from file
+- zigmod support
 - The current error handling is a little bit rustic, sometimes rough :) A proper error handling strategy would be better.
 - The `Lua.Table` should support JSON and deep-copy between Lua table and user structs.
 - Lua Coroutine support
