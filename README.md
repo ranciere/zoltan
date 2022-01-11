@@ -1,3 +1,4 @@
+![zoltan](zoltan.png)
 # zoltan
 
 A Sol-inspired minimalist Lua binding for Zig.
