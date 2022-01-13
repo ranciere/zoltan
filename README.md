@@ -268,11 +268,13 @@ std.testing.expect(ptr.getA() == 42);
 ```
 
 ## TODO
-
-- Option for building without libc (if possible)
+In order of importance:
+- The current error handling is a little bit rustic, sometimes rough :) A proper error handling strategy would be better.
 - Run Lua code from file
 - zigmod support
-- The current error handling is a little bit rustic, sometimes rough :) A proper error handling strategy would be better.
-- The `Lua.Table` should support JSON and deep-copy between Lua table and user structs.
+- LuaJIT support
+- `Lua.Table` should deep-copy between table and user structs
 - Lua Coroutine support
+- `Lua.Table` should support JSON
+- Option for building without libc (if possible)
 - Performance benchmarks
