@@ -13,9 +13,9 @@ pub const Lua = struct {
         registeredTypes: std.StringArrayHashMap([]const u8) = undefined,
 
         fn init(_allocator: std.mem.Allocator) LuaUserData {
-            return LuaUserData {
+            return LuaUserData{
                 .allocator = _allocator,
-                .registeredTypes = std.StringArrayHashMap([]const u8).init(_allocator)
+                .registeredTypes = std.StringArrayHashMap([]const u8).init(_allocator),
             };
         }
 
@@ -23,14 +23,14 @@ pub const Lua = struct {
             self.registeredTypes.clearAndFree();
         }
     };
-    
+
     L: *lualib.lua_State,
     ud: *LuaUserData,
 
     pub fn init(allocator: std.mem.Allocator) !Lua {
         var _ud = try allocator.create(LuaUserData);
         _ud.* = LuaUserData.init(allocator);
-        
+
         var _state = lualib.lua_newstate(alloc, _ud) orelse return error.OutOfMemory;
         var state = Lua{
             .L = _state,
@@ -675,8 +675,8 @@ pub const Lua = struct {
     }
 
     fn getUserData(L: ?*lualib.lua_State) *Lua.LuaUserData {
-        var ud : *anyopaque = undefined;
-        _ = lualib.lua_getallocf (L, @ptrCast([*c]?*anyopaque, &ud));
+        var ud: *anyopaque = undefined;
+        _ = lualib.lua_getallocf(L, @ptrCast([*c]?*anyopaque, &ud));
         const userData = @ptrCast(*Lua.LuaUserData, @alignCast(@alignOf(Lua.LuaUserData), ud));
         return userData;
     }

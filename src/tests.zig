@@ -666,7 +666,7 @@ test "Custom types II: set as global, get without ownership" {
 
     _ = try lua.newUserType(TestCustomType);
     // Creation from Zig
-    var ojjectum = try lua.createUserType(TestCustomType, .{42, 42.0, "life", true});
+    var ojjectum = try lua.createUserType(TestCustomType, .{ 42, 42.0, "life", true });
     defer lua.release(ojjectum);
 
     lua.set("zig", ojjectum);
