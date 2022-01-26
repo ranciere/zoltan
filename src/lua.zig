@@ -10,12 +10,12 @@ pub const lualib = @cImport({
 pub const Lua = struct {
     const LuaUserData = struct {
         allocator: std.mem.Allocator,
-        registeredTypes: std.StringArrayHashMap([]const u8) = undefined,
+        registeredTypes: std.StringArrayHashMap([:0]const u8) = undefined,
 
         fn init(_allocator: std.mem.Allocator) LuaUserData {
-            return LuaUserData {
+            return LuaUserData{
                 .allocator = _allocator,
-                .registeredTypes = std.StringArrayHashMap([]const u8).init(_allocator)
+                .registeredTypes = std.StringArrayHashMap([:0]const u8).init(_allocator),
             };
         }
 
@@ -23,14 +23,14 @@ pub const Lua = struct {
             self.registeredTypes.clearAndFree();
         }
     };
-    
+
     L: *lualib.lua_State,
     ud: *LuaUserData,
 
     pub fn init(allocator: std.mem.Allocator) !Lua {
         var _ud = try allocator.create(LuaUserData);
         _ud.* = LuaUserData.init(allocator);
-        
+
         var _state = lualib.lua_newstate(alloc, _ud) orelse return error.OutOfMemory;
         var state = Lua{
             .L = _state,
@@ -40,7 +40,7 @@ pub const Lua = struct {
     }
 
     pub fn destroy(self: *Lua) void {
-        _ = lualib.lua_close(self.L);
+        lualib.lua_close(self.L);
         self.ud.destroy();
         var allocator = self.ud.allocator;
         allocator.destroy(self.ud);
@@ -72,18 +72,18 @@ pub const Lua = struct {
         self.run(cmd);
     }
 
-    pub fn run(self: *Lua, script: []const u8) void {
-        _ = lualib.luaL_loadstring(self.L, @ptrCast([*c]const u8, script));
+    pub fn run(self: *Lua, script: [*:0]const u8) void {
+        _ = lualib.luaL_loadstring(self.L, script);
         _ = lualib.lua_pcallk(self.L, 0, 0, 0, 0, null);
     }
 
-    pub fn set(self: *Lua, name: []const u8, value: anytype) void {
+    pub fn set(self: *Lua, name: [*:0]const u8, value: anytype) void {
         _ = push(self.L, value);
-        _ = lualib.lua_setglobal(self.L, @ptrCast([*c]const u8, name));
+        _ = lualib.lua_setglobal(self.L, name);
     }
 
-    pub fn get(self: *Lua, comptime T: type, name: []const u8) !T {
-        const typ = lualib.lua_getglobal(self.L, @ptrCast([*c]const u8, name));
+    pub fn get(self: *Lua, comptime T: type, name: [*:0]const u8) !T {
+        const typ = lualib.lua_getglobal(self.L, name);
         if (typ != lualib.LUA_TNIL) {
             return try pop(T, self.L);
         } else {
@@ -91,8 +91,8 @@ pub const Lua = struct {
         }
     }
 
-    pub fn getResource(self: *Lua, comptime T: type, name: []const u8) !T {
-        const typ = lualib.lua_getglobal(self.L, @ptrCast([*c]const u8, name));
+    pub fn getResource(self: *Lua, comptime T: type, name: [*:0]const u8) !T {
+        const typ = lualib.lua_getglobal(self.L, name);
         if (typ != lualib.LUA_TNIL) {
             return try popResource(T, self.L);
         } else {
@@ -106,16 +106,15 @@ pub const Lua = struct {
     }
 
     pub fn createUserType(self: *Lua, comptime T: type, params: anytype) !Ref(T) {
-        var metaTableName: []const u8 = undefined;
+        // Find the corresponding metatable name
+        var metaTableName: [:0]const u8 = if (getUserData(self.L).registeredTypes.get(@typeName(T))) |name|
+            name
+        else
+            return error.unregistered_type;
         // Allocate memory
         var ptr = @ptrCast(*T, @alignCast(@alignOf(T), lualib.lua_newuserdata(self.L, @sizeOf(T))));
         // set its metatable
-        if (getUserData(self.L).registeredTypes.get(@typeName(T))) |name| {
-            metaTableName = name;
-        } else {
-            return error.unregistered_type;
-        }
-        _ = lualib.luaL_getmetatable(self.L, @ptrCast([*c]const u8, metaTableName[0..]));
+        _ = lualib.luaL_getmetatable(self.L, metaTableName.ptr);
         _ = lualib.lua_setmetatable(self.L, -2);
         // (3) init & copy wrapped object
         // Call init
@@ -144,8 +143,8 @@ pub const Lua = struct {
     pub fn newUserType(self: *Lua, comptime T: type) !void {
         comptime var hasInit: bool = false;
         comptime var hasDestroy: bool = false;
-        comptime var metaTblName: [1024]u8 = undefined;
-        _ = comptime try std.fmt.bufPrint(metaTblName[0..], "{s}", .{@typeName(T)});
+        comptime var metaTblNameBuffer: [1024]u8 = undefined;
+        comptime var metaTblName = comptime try std.fmt.bufPrintZ(&metaTblNameBuffer, "{s}", .{@typeName(T)});
         // Init Lua states
         comptime var allocFuns = struct {
             fn new(L: ?*lualib.lua_State) callconv(.C) c_int {
@@ -156,7 +155,7 @@ pub const Lua = struct {
                 // (2) create Lua object
                 var ptr = @ptrCast(*T, @alignCast(@alignOf(T), lualib.lua_newuserdata(L, @sizeOf(T))));
                 // set its metatable
-                _ = lualib.luaL_getmetatable(L, @ptrCast([*c]const u8, metaTblName[0..]));
+                _ = lualib.luaL_getmetatable(L, metaTblName[0..]);
                 _ = lualib.lua_setmetatable(L, -2);
                 // (3) init & copy wrapped object
                 caller.call(T.init) catch unreachable;
@@ -170,13 +169,13 @@ pub const Lua = struct {
             }
 
             fn gc(L: ?*lualib.lua_State) callconv(.C) c_int {
-                var ptr = @ptrCast(*T, @alignCast(@alignOf(T), lualib.luaL_checkudata(L, 1, @ptrCast([*c]const u8, metaTblName[0..]))));
+                var ptr = @ptrCast(*T, @alignCast(@alignOf(T), lualib.luaL_checkudata(L, 1, metaTblName.ptr)));
                 ptr.destroy();
                 return 0;
             }
         };
         // Create metatable
-        _ = lualib.luaL_newmetatable(self.L, @ptrCast([*c]const u8, metaTblName[0..]));
+        _ = lualib.luaL_newmetatable(self.L, metaTblName.ptr);
         // Metatable.__index = metatable
         lualib.lua_pushvalue(self.L, -1);
         lualib.lua_setfield(self.L, -2, "__index");
@@ -199,7 +198,8 @@ pub const Lua = struct {
                                 comptime var field = @field(T, decl.name);
                                 const Caller = ZigCallHelper(@TypeOf(field));
                                 Caller.pushFunctor(self.L, field) catch unreachable;
-                                lualib.lua_setfield(self.L, -2, @ptrCast([*c]const u8, decl.name));
+                                const decl_name_z = comptime addZ(u8, decl.name);
+                                lualib.lua_setfield(self.L, -2, @as([*:0]const u8, decl_name_z.ptr));
                             }
                         },
                         else => {},
@@ -220,10 +220,10 @@ pub const Lua = struct {
         lualib.lua_setfield(self.L, -2, "new");
 
         // Set as global ('require' requires luaopen_{libraname} named static C functionsa and we don't want to provide one)
-        _ = lualib.lua_setglobal(self.L, @ptrCast([*c]const u8, metaTblName[0..]));
+        _ = lualib.lua_setglobal(self.L, metaTblName.ptr);
 
         // Store in the registry
-        try getUserData(self.L).registeredTypes.put(@typeName(T), metaTblName[0..]);
+        try getUserData(self.L).registeredTypes.put(@typeName(T), metaTblName);
     }
 
     pub fn Function(comptime T: type) type {
@@ -405,23 +405,31 @@ pub const Lua = struct {
                     switch (@typeInfo(PointerInfo.child)) {
                         .Array => |childInfo| {
                             if (childInfo.child == u8) {
-                                _ = lualib.lua_pushstring(L, @ptrCast([*c]const u8, value));
-                            } else {
-                                @compileError("invalid type: '" ++ @typeName(T) ++ "'");
+                                if (childInfo.sentinel) |sentinel| {
+                                    if (sentinel == 0) {
+                                        _ = lualib.lua_pushstring(L, @as([*:0]const u8, value));
+                                        return;
+                                    }
+                                }
                             }
+                            @compileError("invalid type: '" ++ @typeName(T) ++ "'");
                         },
                         .Struct => {
                             unreachable;
                         },
-                        else => @compileError("BAszomalassan"),
+                        else => @compileError("invalid type: '" ++ @typeName(T) ++ "'"),
                     }
                 },
                 .Many => {
                     if (PointerInfo.child == u8) {
-                        _ = lualib.lua_pushstring(L, @ptrCast([*c]const u8, value));
-                    } else {
-                        @compileError("invalid type: '" ++ @typeName(T) ++ "'. Typeinfo: '" ++ @typeInfo(PointerInfo.child) ++ "'");
+                        if (PointerInfo.sentinel) |sentinel| {
+                            if (sentinel == 0) {
+                                _ = lualib.lua_pushstring(L, @as([*:0]const u8, value));
+                                return;
+                            }
+                        }
                     }
+                    @compileError("invalid type: '" ++ @typeName(T) ++ "'. child type: '" ++ @typeName(PointerInfo.child) ++ "'");
                 },
                 .C => {
                     if (PointerInfo.child == u8) {
@@ -472,7 +480,7 @@ pub const Lua = struct {
                     // [] const u8 case
                     if (PointerInfo.child == u8 and PointerInfo.is_const) {
                         var len: usize = 0;
-                        var ptr = lualib.lua_tolstring(L, -1, @ptrCast([*c]usize, &len));
+                        var ptr = lualib.lua_tolstring(L, -1, &len);
                         var result: T = ptr[0..len];
                         return result;
                     } else @compileError("Only '[]const u8' (aka string) is supported allocless.");
@@ -480,7 +488,7 @@ pub const Lua = struct {
                 .One => {
                     var optionalTbl = getUserData(L).registeredTypes.get(@typeName(PointerInfo.child));
                     if (optionalTbl) |tbl| {
-                        var result = @ptrCast(T, @alignCast(@alignOf(PointerInfo.child), lualib.luaL_checkudata(L, -1, @ptrCast([*c]const u8, tbl[0..]))));
+                        var result = @ptrCast(T, @alignCast(@alignOf(PointerInfo.child), lualib.luaL_checkudata(L, -1, tbl)));
                         return result;
                     } else {
                         return error.invalidType;
@@ -651,7 +659,7 @@ pub const Lua = struct {
             };
 
             pub fn pushFunctor(L: ?*lualib.lua_State, func: funcType) !void {
-                const funcPtrAsInt = @intCast(c_longlong, @ptrToInt(func));
+                const funcPtrAsInt = @intCast(lualib.lua_Integer, @ptrToInt(func));
                 lualib.lua_pushinteger(L, funcPtrAsInt);
 
                 const cfun = struct {
@@ -675,9 +683,9 @@ pub const Lua = struct {
     }
 
     fn getUserData(L: ?*lualib.lua_State) *Lua.LuaUserData {
-        var ud : *anyopaque = undefined;
-        _ = lualib.lua_getallocf (L, @ptrCast([*c]?*anyopaque, &ud));
-        const userData = @ptrCast(*Lua.LuaUserData, @alignCast(@alignOf(Lua.LuaUserData), ud));
+        var ud: ?*anyopaque = undefined;
+        _ = lualib.lua_getallocf(L, &ud);
+        const userData = @ptrCast(*Lua.LuaUserData, @alignCast(@alignOf(Lua.LuaUserData), ud.?));
         return userData;
     }
 
@@ -703,6 +711,14 @@ pub const Lua = struct {
             // When osize is some other value, Lua is allocating memory for something else.
             return (userData.allocator.alignedAlloc(u8, c_alignment, nsize) catch return null).ptr;
         }
+    }
+
+    // Credit: ifreund@github.com in https://github.com/ziglang/zig/issues/9182#issuecomment-867122969
+    fn addZ(comptime T: type, comptime s: []const T) [:0]T {
+        var arr: [s.len + 1]T = undefined;
+        std.mem.copy(T, &arr, s);
+        arr[s.len] = 0;
+        return arr[0..s.len :0];
     }
 };
 
