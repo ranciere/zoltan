@@ -50,12 +50,12 @@ test "set/get string" {
     var lua = try Lua.init(std.testing.allocator);
     defer lua.destroy();
 
-    var strMany: [*]const u8 = "macilaci";
+    var strMany: [*:0]const u8 = "macilaci";
     var strSlice: []const u8 = "macilaic";
     var strOne = "macilaci";
     var strC: [*c]const u8 = "macilaci";
 
-    const cstrMany: [*]const u8 = "macilaci";
+    const cstrMany: [*:0]const u8 = "macilaci";
     const cstrSlice: []const u8 = "macilaic";
     const cstrOne = "macilaci";
     const cstrC: [*c]const u8 = "macilaci";
@@ -63,12 +63,12 @@ test "set/get string" {
     lua.set("stringMany", strMany);
     lua.set("stringSlice", strSlice);
     lua.set("stringOne", strOne);
-    lua.set("stringC", strC);
+    lua.set("stringC", std.mem.span(strC));
 
     lua.set("cstringMany", cstrMany);
     lua.set("cstringSlice", cstrSlice);
     lua.set("cstringOne", cstrOne);
-    lua.set("cstringC", cstrC);
+    lua.set("cstringC", std.mem.span(cstrC));
 
     const retStrMany = try lua.get([]const u8, "stringMany");
     const retCStrMany = try lua.get([]const u8, "cstringMany");
