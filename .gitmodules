@@ -1,0 +1,3 @@
+[submodule "luajit"]
+	path = luajit
+	url = https://github.com/bcareil/zig-luajit.git

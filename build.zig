@@ -27,21 +27,37 @@ pub fn build(b: *std.build.Builder) void {
     run_step.dependOn(&run_cmd.step);
 
     const exe_tests = b.addTest("src/tests.zig");
-    // Lua 
-    addLuaLibrary(exe_tests, "" );
+    // Lua
+    addLuaLibrary(exe_tests, "");
 
     //
     exe_tests.setBuildMode(mode);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&exe_tests.step);
+
+    const exe_tests_lj = b.addTest("src/tests.zig");
+    exe_tests_lj.setBuildMode(mode);
+    exe_tests_lj.setTarget(target);
+    addLuajitLibrary(exe_tests_lj, "");
+
+    const test_lj_step = b.step("test-lj", "Run unit tests with Luajit");
+    test_lj_step.dependOn(&exe_tests_lj.step);
 }
 
-pub fn addLuaLibrary(exe: *std.build.LibExeObjStep, installPath: [] const u8) void {
+pub fn addLuajitLibrary(exe: *std.build.LibExeObjStep, installPath: []const u8) void {
+    const lj = @import("luajit/build.zig");
+    lj.addLuajit(exe) catch unreachable;
+    exe.addPackagePath("zoltan_lua_config", "src/config_luajit.zig");
+    _ = installPath;
+}
+
+pub fn addLuaLibrary(exe: *std.build.LibExeObjStep, installPath: []const u8) void {
     var buf: [1024]u8 = undefined;
     // Lua headers + required source files
-    var path = std.fmt.bufPrint(buf[0..], "{s}{s}", .{ installPath, "src/lua-5.4.3/src"}) catch unreachable;
+    var path = std.fmt.bufPrint(buf[0..], "{s}{s}", .{ installPath, "src/lua-5.4.3/src" }) catch unreachable;
 
+    exe.addPackagePath("zoltan_lua_config", "src/config_lua_543.zig");
     exe.addIncludeDir(path);
     // C compile flags
     const flags = [_][]const u8{
@@ -49,13 +65,13 @@ pub fn addLuaLibrary(exe: *std.build.LibExeObjStep, installPath: [] const u8) vo
         "-O2",
     };
     for (luaFiles) |luaFile| {
-        var cPath = std.fmt.bufPrint(buf[0..], "{s}{s}", .{ installPath, luaFile}) catch unreachable;
+        var cPath = std.fmt.bufPrint(buf[0..], "{s}{s}", .{ installPath, luaFile }) catch unreachable;
         exe.addCSourceFile(cPath, &flags);
     }
     exe.linkLibC();
 }
 
-const luaFiles = [_] []const u8{
+const luaFiles = [_][]const u8{
     "src/lua-5.4.3/src/lapi.c",
     "src/lua-5.4.3/src/lauxlib.c",
     "src/lua-5.4.3/src/lbaselib.c",
