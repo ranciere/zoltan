@@ -1,6 +1,8 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
+const config = @import("zoltan_lua_config");
+
 pub const lualib = @cImport({
     @cInclude("lua.h");
     @cInclude("lauxlib.h");
@@ -13,24 +15,21 @@ pub const Lua = struct {
         registeredTypes: std.StringArrayHashMap([]const u8) = undefined,
 
         fn init(_allocator: std.mem.Allocator) LuaUserData {
-            return LuaUserData {
-                .allocator = _allocator,
-                .registeredTypes = std.StringArrayHashMap([]const u8).init(_allocator)
-            };
+            return LuaUserData{ .allocator = _allocator, .registeredTypes = std.StringArrayHashMap([]const u8).init(_allocator) };
         }
 
         fn destroy(self: *LuaUserData) void {
             self.registeredTypes.clearAndFree();
         }
     };
-    
+
     L: *lualib.lua_State,
     ud: *LuaUserData,
 
     pub fn init(allocator: std.mem.Allocator) !Lua {
         var _ud = try allocator.create(LuaUserData);
         _ud.* = LuaUserData.init(allocator);
-        
+
         var _state = lualib.lua_newstate(alloc, _ud) orelse return error.OutOfMemory;
         var state = Lua{
             .L = _state,
@@ -74,7 +73,7 @@ pub const Lua = struct {
 
     pub fn run(self: *Lua, script: []const u8) void {
         _ = lualib.luaL_loadstring(self.L, @ptrCast([*c]const u8, script));
-        _ = lualib.lua_pcallk(self.L, 0, 0, 0, 0, null);
+        _ = pcall(self.L, 0, 0, 0);
     }
 
     pub fn set(self: *Lua, name: []const u8, value: anytype) void {
@@ -83,7 +82,7 @@ pub const Lua = struct {
     }
 
     pub fn get(self: *Lua, comptime T: type, name: []const u8) !T {
-        const typ = lualib.lua_getglobal(self.L, @ptrCast([*c]const u8, name));
+        const typ = getGlobal(self.L, name);
         if (typ != lualib.LUA_TNIL) {
             return try pop(T, self.L);
         } else {
@@ -92,7 +91,7 @@ pub const Lua = struct {
     }
 
     pub fn getResource(self: *Lua, comptime T: type, name: []const u8) !T {
-        const typ = lualib.lua_getglobal(self.L, @ptrCast([*c]const u8, name));
+        const typ = getGlobal(self.L, name);
         if (typ != lualib.LUA_TNIL) {
             return try popResource(T, self.L);
         } else {
@@ -130,8 +129,10 @@ pub const Lua = struct {
         ptr.* = @call(.{}, T.init, args);
         // (4) check and store the callback table
         //_ = lua.luaL_checktype(L, 1, lua.LUA_TTABLE);
-        _ = lualib.lua_pushvalue(self.L, 1);
-        _ = lualib.lua_setuservalue(self.L, -2);
+        if (config.has_setuservalue) {
+            _ = lualib.lua_pushvalue(self.L, 1);
+            _ = lualib.lua_setuservalue(self.L, -2);
+        }
         var res = try popResource(Ref(T), self.L);
         res.ptr = ptr;
         return res;
@@ -163,8 +164,10 @@ pub const Lua = struct {
                 ptr.* = caller.result;
                 // (4) check and store the callback table
                 //_ = lua.luaL_checktype(L, 1, lua.LUA_TTABLE);
-                _ = lualib.lua_pushvalue(L, 1);
-                _ = lualib.lua_setuservalue(L, -2);
+                if (config.has_setuservalue) {
+                    _ = lualib.lua_pushvalue(L, 1);
+                    _ = lualib.lua_setuservalue(L, -2);
+                }
 
                 return 1;
             }
@@ -213,7 +216,9 @@ pub const Lua = struct {
         }
         // Only the 'new' function
         // <==_ = lua.luaL_newlib(lua.L, &arraylib_f); ==>
-        lualib.luaL_checkversion(self.L);
+        if (config.has_checkversion) {
+            lualib.luaL_checkversion(self.L);
+        }
         lualib.lua_createtable(self.L, 0, 1);
         // lua.luaL_setfuncs(self.L, &funcs, 0); =>
         lualib.lua_pushcclosure(self.L, allocFuns.new, 0);
@@ -274,7 +279,7 @@ pub const Lua = struct {
                     else => 1,
                 };
                 // Calling
-                if (lualib.lua_pcallk(self.L, fields_info.len, retValCount, 0, 0, null) != lualib.LUA_OK) {
+                if (pcall(self.L, fields_info.len, retValCount, 0) != lualib.LUA_OK) {
                     return error.lua_runtime_error;
                 }
                 // Getting return value(s)
@@ -515,8 +520,13 @@ pub const Lua = struct {
                 .Slice => {
                     defer lualib.lua_pop(L, 1);
                     if (lualib.lua_type(L, -1) == lualib.LUA_TTABLE) {
-                        lualib.lua_len(L, -1);
-                        const len = try pop(u64, L);
+                        const len = switch (config.get_table_length_with) {
+                            .len => blk: {
+                                lualib.lua_len(L, -1);
+                                break :blk try pop(u64, L);
+                            },
+                            .objlen => lualib.lua_objlen(L, -1),
+                        };
                         var res = try getAllocator(L).alloc(PointerInfo.child, @intCast(usize, len));
                         var i: u32 = 0;
                         while (i < len) : (i += 1) {
@@ -674,9 +684,36 @@ pub const Lua = struct {
         };
     }
 
+    fn pcall(L: ?*lualib.lua_State, nargs: c_int, nresults: c_int, errfunc: c_int) c_int {
+        // 5.4 defines pcall as a macro which is causing several issues
+        if (config.has_pcallk) {
+            return lualib.lua_pcallk(L, nargs, nresults, errfunc, 0, null);
+        } else {
+            return lualib.lua_pcall(L, nargs, nresults, errfunc);
+        }
+    }
+
+    fn getGlobal(L: ?*lualib.lua_State, name: []const u8) c_int {
+        if (config.getglobal_returns_type) {
+            return lualib.lua_getglobal(L, @ptrCast([*c]const u8, name));
+        } else {
+            lualib.lua_getglobal(L, @ptrCast([*c]const u8, name));
+            return lualib.lua_type(L, -1);
+        }
+    }
+
+    fn setUserValue(L: ?*lualib.lua_State, index: c_int) void {
+        if (config.has_setuservalue) {
+            // NOTE: returns void in 5.2, int in 5.4
+            _ = lualib.lua_setuservalue(L, index);
+        } else {
+            _ = lualib.setfenv(L, index);
+        }
+    }
+
     fn getUserData(L: ?*lualib.lua_State) *Lua.LuaUserData {
-        var ud : *anyopaque = undefined;
-        _ = lualib.lua_getallocf (L, @ptrCast([*c]?*anyopaque, &ud));
+        var ud: *anyopaque = undefined;
+        _ = lualib.lua_getallocf(L, @ptrCast([*c]?*anyopaque, &ud));
         const userData = @ptrCast(*Lua.LuaUserData, @alignCast(@alignOf(Lua.LuaUserData), ud));
         return userData;
     }
