@@ -38,11 +38,11 @@ pub fn build(b: *std.build.Builder) void {
 ...
   // Exe part
   exe.addPackage(.{ .name = "lua", .path = .{ .path="third_party/zoltan/src/lua.zig" }});
-  addLuaLib(exe, "third_party/zoltan/");
+  addLuaLib(exe);
 ...
   // Test part
   const lua_tests = b.addTest("third_party/zoltan/src/tests.zig");
-  addLuaLib(lua_tests, "third_party/zoltan/");
+  addLuaLib(lua_tests);
   lua_tests.setBuildMode(mode);
 ```
 You can found an example integration [here](https://github.com/ranciere/zoltan_example_app).
