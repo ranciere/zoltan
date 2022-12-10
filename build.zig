@@ -42,7 +42,7 @@ pub fn addLuaLibrary(exe: *std.build.LibExeObjStep, installPath: [] const u8) vo
     // Lua headers + required source files
     var path = std.fmt.bufPrint(buf[0..], "{s}{s}", .{ installPath, "src/lua-5.4.3/src"}) catch unreachable;
 
-    exe.addIncludeDir(path);
+    exe.addIncludePath(path);
     // C compile flags
     const flags = [_][]const u8{
         "-std=c99",

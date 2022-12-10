@@ -127,7 +127,7 @@ pub const Lua = struct {
         inline while (idx < len) : (idx += 1) {
             args[idx] = @field(params, fields_info[idx].name);
         }
-        ptr.* = @call(.{}, T.init, args);
+        ptr.* = @call(.auto, T.init, args);
         // (4) check and store the callback table
         //_ = lua.luaL_checktype(L, 1, lua.LUA_TTABLE);
         _ = lualib.lua_pushvalue(self.L, 1);
@@ -141,11 +141,12 @@ pub const Lua = struct {
         _ = allocateDeallocateHelper(@TypeOf(v), true, self.ud.allocator, v);
     }
 
-    pub fn newUserType(self: *Lua, comptime T: type) !void {
+    // Zig 0.10.0+ returns a fully qualified struct name, so require an explicit UserType name
+    pub fn newUserType(self: *Lua, comptime T: type, comptime name: []const u8) !void {
         comptime var hasInit: bool = false;
         comptime var hasDestroy: bool = false;
         comptime var metaTblName: [1024]u8 = undefined;
-        _ = comptime try std.fmt.bufPrint(metaTblName[0..], "{s}", .{@typeName(T)});
+        _ = comptime try std.fmt.bufPrint(metaTblName[0..], "{s}", .{name});
         // Init Lua states
         comptime var allocFuns = struct {
             fn new(L: ?*lualib.lua_State) callconv(.C) c_int {
@@ -189,20 +190,15 @@ pub const Lua = struct {
         switch (@typeInfo(T)) {
             .Struct => |StructInfo| {
                 inline for (StructInfo.decls) |decl| {
-                    switch (decl.data) {
-                        .Fn => |_| {
-                            if (comptime std.mem.eql(u8, decl.name, "init") == true) {
-                                hasInit = true;
-                            } else if (comptime std.mem.eql(u8, decl.name, "destroy") == true) {
-                                hasDestroy = true;
-                            } else if (decl.is_pub) {
-                                comptime var field = @field(T, decl.name);
-                                const Caller = ZigCallHelper(@TypeOf(field));
-                                Caller.pushFunctor(self.L, field) catch unreachable;
-                                lualib.lua_setfield(self.L, -2, @ptrCast([*c]const u8, decl.name));
-                            }
-                        },
-                        else => {},
+                    if (comptime std.mem.eql(u8, decl.name, "init") == true) {
+                        hasInit = true;
+                    } else if (comptime std.mem.eql(u8, decl.name, "destroy") == true) {
+                        hasDestroy = true;
+                    } else if (decl.is_pub) {
+                        comptime var field = @field(T, decl.name);
+                        const Caller = ZigCallHelper(@TypeOf(field));
+                        Caller.pushFunctor(self.L, field) catch unreachable;
+                        lualib.lua_setfield(self.L, -2, @ptrCast([*c]const u8, decl.name));
                     }
                 }
             },
@@ -228,10 +224,16 @@ pub const Lua = struct {
 
     pub fn Function(comptime T: type) type {
         const FuncType = T;
-        const RetType =
-            switch (@typeInfo(FuncType)) {
-            .Fn => |FunctionInfo| FunctionInfo.return_type,
-            else => @compileError("Unsupported type."),
+        const RetType = blk: {
+            const FuncInfo = @typeInfo(FuncType);
+            if (FuncInfo == .Pointer) {
+                const PointerInfo = @typeInfo(FuncInfo.Pointer.child);
+                if (PointerInfo == .Fn) {
+                    break :blk PointerInfo.Fn.return_type;
+                }
+            }
+
+            @compileError("Unsupported type");
         };
         return struct {
             const Self = @This();
@@ -621,7 +623,8 @@ pub const Lua = struct {
 
                 fn prepareArgs(self: *Self, L: ?*lualib.lua_State) !void {
                     // Prepare arguments
-                    comptime var i = self.args.len - 1;
+                    if (self.args.len <= 0) return;
+                    comptime var i: i32 = self.args.len - 1;
                     inline while (i > -1) : (i -= 1) {
                         if (comptime allocateDeallocateHelper(@TypeOf(self.args[i]), false, null, null)) {
                             self.args[i] = popResource(@TypeOf(self.args[i]), L.?) catch unreachable;
@@ -631,8 +634,8 @@ pub const Lua = struct {
                     }
                 }
 
-                fn call(self: *Self, func: funcType) !void {
-                    self.result = @call(.{}, func, self.args);
+                fn call(self: *Self, func: *const funcType) !void {
+                    self.result = @call(.auto, func, self.args);
                 }
 
                 fn pushResult(self: *Self, L: ?*lualib.lua_State) !void {
@@ -642,7 +645,8 @@ pub const Lua = struct {
                 }
 
                 fn destroyArgs(self: *Self, L: ?*lualib.lua_State) !void {
-                    comptime var i = self.args.len - 1;
+                    if (self.args.len <= 0) return;
+                    comptime var i:i32 = self.args.len - 1;
                     inline while (i > -1) : (i -= 1) {
                         _ = allocateDeallocateHelper(@TypeOf(self.args[i]), true, getAllocator(L), self.args[i]);
                     }
@@ -650,7 +654,7 @@ pub const Lua = struct {
                 }
             };
 
-            pub fn pushFunctor(L: ?*lualib.lua_State, func: funcType) !void {
+            pub fn pushFunctor(L: ?*lualib.lua_State, func: *const funcType) !void {
                 const funcPtrAsInt = @intCast(c_longlong, @ptrToInt(func));
                 lualib.lua_pushinteger(L, funcPtrAsInt);
 
@@ -661,7 +665,7 @@ pub const Lua = struct {
                         f.prepareArgs(_L) catch unreachable;
                         // Get func pointer upvalue as int => convert to func ptr then call
                         var ptr = lualib.lua_tointegerx(_L, lualib.lua_upvalueindex(1), null);
-                        f.call(@intToPtr(funcType, @intCast(usize, ptr))) catch unreachable;
+                        f.call(@intToPtr(*const funcType, @intCast(usize, ptr))) catch unreachable;
                         // The end
                         f.pushResult(_L) catch unreachable;
                         // Release arguments
@@ -691,12 +695,7 @@ pub const Lua = struct {
         const userData = @ptrCast(*Lua.LuaUserData, @alignCast(@alignOf(Lua.LuaUserData), ud));
         if (@ptrCast(?[*]align(c_alignment) u8, @alignCast(c_alignment, ptr))) |previous_pointer| {
             const previous_slice = previous_pointer[0..osize];
-            if (osize >= nsize) {
-                // Lua assumes that the allocator never fails when osize >= nsize.
-                return userData.allocator.alignedShrink(previous_slice, c_alignment, nsize).ptr;
-            } else {
-                return (userData.allocator.reallocAdvanced(previous_slice, c_alignment, nsize, .exact) catch return null).ptr;
-            }
+            return (userData.allocator.realloc(previous_slice, nsize) catch return null).ptr;
         } else {
             // osize is any of LUA_TSTRING, LUA_TTABLE, LUA_TFUNCTION, LUA_TUSERDATA, or LUA_TTHREAD
             // when (and only when) Lua is creating a new object of that type.
@@ -707,7 +706,7 @@ pub const Lua = struct {
 };
 
 pub fn main() anyerror!void {
-    var lua = try Lua.init(std.testing.allocator);
+    var lua = try Lua.init(std.heap.c_allocator);
     defer lua.destroy();
     lua.openLibs();
 
