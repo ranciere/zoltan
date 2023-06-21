@@ -13,24 +13,21 @@ pub const Lua = struct {
         registeredTypes: std.StringArrayHashMap([]const u8) = undefined,
 
         fn init(_allocator: std.mem.Allocator) LuaUserData {
-            return LuaUserData {
-                .allocator = _allocator,
-                .registeredTypes = std.StringArrayHashMap([]const u8).init(_allocator)
-            };
+            return LuaUserData{ .allocator = _allocator, .registeredTypes = std.StringArrayHashMap([]const u8).init(_allocator) };
         }
 
         fn destroy(self: *LuaUserData) void {
             self.registeredTypes.clearAndFree();
         }
     };
-    
+
     L: *lualib.lua_State,
     ud: *LuaUserData,
 
     pub fn init(allocator: std.mem.Allocator) !Lua {
         var _ud = try allocator.create(LuaUserData);
         _ud.* = LuaUserData.init(allocator);
-        
+
         var _state = lualib.lua_newstate(alloc, _ud) orelse return error.OutOfMemory;
         var state = Lua{
             .L = _state,
@@ -378,7 +375,7 @@ pub const Lua = struct {
     fn pushSlice(comptime T: type, L: *lualib.lua_State, values: []const T) void {
         lualib.lua_createtable(L, @intCast(c_int, values.len), 0);
 
-        for (values) |value, i| {
+        for (values, 0..) |value, i| {
             push(L, i + 1);
             push(L, value);
             lualib.lua_settable(L, -3);
@@ -646,7 +643,7 @@ pub const Lua = struct {
 
                 fn destroyArgs(self: *Self, L: ?*lualib.lua_State) !void {
                     if (self.args.len <= 0) return;
-                    comptime var i:i32 = self.args.len - 1;
+                    comptime var i: i32 = self.args.len - 1;
                     inline while (i > -1) : (i -= 1) {
                         _ = allocateDeallocateHelper(@TypeOf(self.args[i]), true, getAllocator(L), self.args[i]);
                     }
@@ -679,8 +676,8 @@ pub const Lua = struct {
     }
 
     fn getUserData(L: ?*lualib.lua_State) *Lua.LuaUserData {
-        var ud : *anyopaque = undefined;
-        _ = lualib.lua_getallocf (L, @ptrCast([*c]?*anyopaque, &ud));
+        var ud: *anyopaque = undefined;
+        _ = lualib.lua_getallocf(L, @ptrCast([*c]?*anyopaque, &ud));
         const userData = @ptrCast(*Lua.LuaUserData, @alignCast(@alignOf(Lua.LuaUserData), ud));
         return userData;
     }

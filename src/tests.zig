@@ -112,11 +112,11 @@ test "set/get slice of primitive type (scalar, unmutable string)" {
     const retStrSlice = try lua.getResource([][]const u8, "strSlice");
     defer lua.release(retStrSlice);
 
-    for (retIntSlice) |v, i| {
+    for (retIntSlice, 0..) |v, i| {
         try std.testing.expectEqual(v, intSlice[i]);
     }
 
-    for (retStrSlice) |v, i| {
+    for (retStrSlice, 0..) |v, i| {
         try std.testing.expect(std.mem.eql(u8, v, strSlice[i]));
     }
 }
@@ -666,7 +666,7 @@ test "Custom types II: set as global, get without ownership" {
 
     _ = try lua.newUserType(TestCustomType, "TestCustomType");
     // Creation from Zig
-    var ojjectum = try lua.createUserType(TestCustomType, .{42, 42.0, "life", true});
+    var ojjectum = try lua.createUserType(TestCustomType, .{ 42, 42.0, "life", true });
     defer lua.release(ojjectum);
 
     lua.set("zig", ojjectum);

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn build(b: *std.build.Builder) void {
+pub fn build(b: *std.Build) void {
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -9,15 +9,19 @@ pub fn build(b: *std.build.Builder) void {
 
     // Standard release options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
-    const mode = b.standardReleaseOptions();
+    const optimize = b.standardOptimizeOption(.{});
 
-    const exe = b.addExecutable("zoltan", "src/lua.zig");
-    addLuaLibrary(exe, "");
-    exe.setTarget(target);
-    exe.setBuildMode(mode);
-    exe.install();
+    const exe = b.addExecutable(.{
+        .name = "zoltan",
+        .root_source_file = .{ .path = "src/lua.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    addLuaLibrary(b, exe, "");
 
-    const run_cmd = exe.run();
+    b.installArtifact(exe);
+
+    const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
         run_cmd.addArgs(args);
@@ -26,21 +30,21 @@ pub fn build(b: *std.build.Builder) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const exe_tests = b.addTest("src/tests.zig");
-    // Lua 
-    addLuaLibrary(exe_tests, "" );
-
-    //
-    exe_tests.setBuildMode(mode);
+    const exe_tests = b.addTest(.{
+        .root_source_file = .{ .path = "src/tests.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    // Lua
+    addLuaLibrary(b, exe_tests, "");
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&exe_tests.step);
 }
 
-pub fn addLuaLibrary(exe: *std.build.LibExeObjStep, installPath: [] const u8) void {
-    var buf: [1024]u8 = undefined;
+pub fn addLuaLibrary(b: *std.Build, exe: *std.Build.Step.Compile, installPath: []const u8) void {
     // Lua headers + required source files
-    var path = std.fmt.bufPrint(buf[0..], "{s}{s}", .{ installPath, "src/lua-5.4.3/src"}) catch unreachable;
+    var path = b.fmt("{s}{s}", .{ installPath, "src/lua-5.4.3/src" });
 
     exe.addIncludePath(path);
     // C compile flags
@@ -49,13 +53,13 @@ pub fn addLuaLibrary(exe: *std.build.LibExeObjStep, installPath: [] const u8) vo
         "-O2",
     };
     for (luaFiles) |luaFile| {
-        var cPath = std.fmt.bufPrint(buf[0..], "{s}{s}", .{ installPath, luaFile}) catch unreachable;
+        var cPath = b.fmt("{s}{s}", .{ installPath, luaFile });
         exe.addCSourceFile(cPath, &flags);
     }
     exe.linkLibC();
 }
 
-const luaFiles = [_] []const u8{
+const luaFiles = [_][]const u8{
     "src/lua-5.4.3/src/lapi.c",
     "src/lua-5.4.3/src/lauxlib.c",
     "src/lua-5.4.3/src/lbaselib.c",
