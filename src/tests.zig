@@ -112,11 +112,11 @@ test "set/get slice of primitive type (scalar, unmutable string)" {
     const retStrSlice = try lua.getResource([][]const u8, "strSlice");
     defer lua.release(retStrSlice);
 
-    for (retIntSlice) |v, i| {
+    for (retIntSlice, 0..) |v, i| {
         try std.testing.expectEqual(v, intSlice[i]);
     }
 
-    for (retStrSlice) |v, i| {
+    for (retStrSlice, 0..) |v, i| {
         try std.testing.expect(std.mem.eql(u8, v, strSlice[i]));
     }
 }
@@ -136,19 +136,19 @@ test "simple Zig => Lua function call" {
 
     lua.run(lua_command);
 
-    var fun1 = try lua.getResource(Lua.Function(fn () void), "test_1");
+    var fun1 = try lua.getResource(Lua.Function(*const fn () void), "test_1");
     defer lua.release(fun1);
 
-    var fun2 = try lua.getResource(Lua.Function(fn (a: i32) void), "test_2");
+    var fun2 = try lua.getResource(Lua.Function(*const fn (a: i32) void), "test_2");
     defer lua.release(fun2);
 
-    var fun3_1 = try lua.getResource(Lua.Function(fn (a: i32) i32), "test_3");
+    var fun3_1 = try lua.getResource(Lua.Function(*const fn (a: i32) i32), "test_3");
     defer lua.release(fun3_1);
 
-    var fun3_2 = try lua.getResource(Lua.Function(fn (a: []const u8) []const u8), "test_3");
+    var fun3_2 = try lua.getResource(Lua.Function(*const fn (a: []const u8) []const u8), "test_3");
     defer lua.release(fun3_2);
 
-    var fun4 = try lua.getResource(Lua.Function(fn (a: i32, b: i32) i32), "test_4");
+    var fun4 = try lua.getResource(Lua.Function(*const fn (a: i32, b: i32) i32), "test_4");
     defer lua.release(fun4);
 
     try fun1.call(.{});
@@ -249,10 +249,10 @@ test "simple Zig => Lua => Zig function call" {
     lua.run("function luaTestFun4(a) return testFun4(a); end");
     lua.run("function luaTestFun5(a,b) return testFun5(a,b); end");
 
-    var fun4 = try lua.getResource(Lua.Function(fn (a: []const u8) []const u8), "luaTestFun4");
+    var fun4 = try lua.getResource(Lua.Function(*const fn (a: []const u8) []const u8), "luaTestFun4");
     defer lua.release(fun4);
 
-    var fun5 = try lua.getResource(Lua.Function(fn (a: i32, b: i32) i32), "luaTestFun5");
+    var fun5 = try lua.getResource(Lua.Function(*const fn (a: i32, b: i32) i32), "luaTestFun5");
     defer lua.release(fun5);
 
     var res4 = try fun4.call(.{"macika"});
@@ -262,7 +262,7 @@ test "simple Zig => Lua => Zig function call" {
     try std.testing.expect(res5 == 41);
 }
 
-fn testLuaInnerFun(fun: Lua.Function(fn (a: i32) i32)) i32 {
+fn testLuaInnerFun(fun: Lua.Function(*const fn (a: i32) i32)) i32 {
     var res = fun.call(.{42}) catch unreachable;
     return res;
 }
@@ -274,7 +274,7 @@ test "Lua function injection into Zig function" {
     lua.openLibs();
     // Binding on Zig side
     lua.run("function getInt(a) return a+1; end");
-    var luafun = try lua.getResource(Lua.Function(fn (a: i32) i32), "getInt");
+    var luafun = try lua.getResource(Lua.Function(*const fn (a: i32) i32), "getInt");
     defer lua.release(luafun);
 
     var result = testLuaInnerFun(luafun);
@@ -456,7 +456,7 @@ test "Lua.Table inner table tests" {
 
     str = try retInner2Table.get([]const u8, "str");
     int = try retInner2Table.get(i32, "int32");
-    var func = try retInner2Table.getResource(Lua.Function(fn (a: i32) i32), "fn");
+    var func = try retInner2Table.getResource(Lua.Function(*const fn (a: i32) i32), "fn");
     defer lua.release(func);
     var funcRes = try func.call(.{42});
 
@@ -492,7 +492,7 @@ test "Function with Lua.Table argument" {
     lua.set("sumFn", testLuaTableArg);
     lua.run("function test() return sumFn({a=1, b=2}); end");
 
-    var luaFun = try lua.getResource(Lua.Function(fn () i32), "test");
+    var luaFun = try lua.getResource(Lua.Function(*const fn () i32), "test");
     defer lua.release(luaFun);
 
     var luaRes = try luaFun.call(.{});
@@ -527,7 +527,7 @@ test "Function with Lua.Table result" {
     //lua.run("function test() tbl = tblFn({}); return tbl[1] + tbl[2]; end");
     lua.run("function test() tbl = tblFn({}); return tbl[1] + tbl[2]; end");
 
-    var luaFun = try lua.getResource(Lua.Function(fn () i32), "test");
+    var luaFun = try lua.getResource(Lua.Function(*const fn () i32), "test");
     defer lua.release(luaFun);
 
     var luaRes = try luaFun.call(.{});
@@ -587,7 +587,7 @@ test "Custom types I: allocless in/out member functions arguments" {
     defer lua.destroy();
     lua.openLibs();
 
-    try lua.newUserType(TestCustomType);
+    try lua.newUserType(TestCustomType, "TestCustomType");
 
     const cmd =
         \\o = TestCustomType.new(42, 42.0, "life", true)
@@ -600,22 +600,22 @@ test "Custom types I: allocless in/out member functions arguments" {
     ;
     lua.run(cmd);
 
-    var getA = try lua.getResource(Lua.Function(fn () i32), "getA");
+    var getA = try lua.getResource(Lua.Function(*const fn () i32), "getA");
     defer lua.release(getA);
 
-    var getB = try lua.getResource(Lua.Function(fn () f32), "getB");
+    var getB = try lua.getResource(Lua.Function(*const fn () f32), "getB");
     defer lua.release(getB);
 
-    var getC = try lua.getResource(Lua.Function(fn () []const u8), "getC");
+    var getC = try lua.getResource(Lua.Function(*const fn () []const u8), "getC");
     defer lua.release(getC);
 
-    var getD = try lua.getResource(Lua.Function(fn () bool), "getD");
+    var getD = try lua.getResource(Lua.Function(*const fn () bool), "getD");
     defer lua.release(getD);
 
-    var reset = try lua.getResource(Lua.Function(fn () void), "reset");
+    var reset = try lua.getResource(Lua.Function(*const fn () void), "reset");
     defer lua.release(reset);
 
-    var store = try lua.getResource(Lua.Function(fn (_a: i32, _b: f32, _c: []const u8, _d: bool) void), "store");
+    var store = try lua.getResource(Lua.Function(*const fn (_a: i32, _b: f32, _c: []const u8, _d: bool) void), "store");
     defer lua.release(store);
 
     var resA0 = try getA.call(.{});
@@ -664,9 +664,9 @@ test "Custom types II: set as global, get without ownership" {
     defer lua.destroy();
     lua.openLibs();
 
-    _ = try lua.newUserType(TestCustomType);
+    _ = try lua.newUserType(TestCustomType, "TestCustomType");
     // Creation from Zig
-    var ojjectum = try lua.createUserType(TestCustomType, .{42, 42.0, "life", true});
+    var ojjectum = try lua.createUserType(TestCustomType, .{ 42, 42.0, "life", true });
     defer lua.release(ojjectum);
 
     lua.set("zig", ojjectum);
@@ -714,7 +714,7 @@ test "Custom types III: Zig function with custom user type arguments" {
     defer lua.destroy();
     lua.openLibs();
 
-    _ = try lua.newUserType(TestCustomType);
+    _ = try lua.newUserType(TestCustomType, "TestCustomType");
     lua.set("swap", testCustomTypeSwap);
 
     const cmd =
